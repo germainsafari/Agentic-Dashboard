@@ -1,11 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runSync } from "@/lib/sync";
+import { runSync, SyncAlreadyRunningError } from "@/lib/sync";
 import { allResolvedDirectors } from "@/lib/directors";
-import { isPersistentCacheEnabled, getPersistentStoreLabel } from "@/lib/snapshot-cache";
-import { syncIntervalDays } from "@/lib/sync-schedule";
+import {
+  getCachedDirector,
+  isPersistentCacheEnabled,
+  getPersistentStoreLabel,
+} from "@/lib/snapshot-cache";
+import { syncIntervalDays, syncIntervalMs } from "@/lib/sync-schedule";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+// Production syncs can take 5–10 minutes per director. Render does not enforce
+// this Next.js hint; Vercel requires Pro/Enterprise for durations above 300 s.
+export const maxDuration = 800;
 
 /**
  * Scheduled Scoro sync — refreshes director snapshots into Redis (Upstash KV).
@@ -28,10 +34,35 @@ export async function GET(req: NextRequest) {
   }
 
   const directorId = req.nextUrl.searchParams.get("director") ?? undefined;
+  const scheduled = req.nextUrl.searchParams.get("scheduled") === "1";
   const startMs = Date.now();
 
   try {
     if (directorId) {
+      const directorExists = allResolvedDirectors().some((director) => director.id === directorId);
+      if (!directorExists) {
+        return NextResponse.json(
+          { ok: false, error: `Unknown director: ${directorId}` },
+          { status: 400 }
+        );
+      }
+
+      if (scheduled) {
+        const cached = await getCachedDirector(directorId);
+        const fetchedAtMs = cached ? new Date(cached.fetchedAt).getTime() : Number.NaN;
+        if (Number.isFinite(fetchedAtMs) && Date.now() - fetchedAtMs < syncIntervalMs()) {
+          return NextResponse.json({
+            ok: true,
+            skipped: true,
+            reason: "snapshot_not_due",
+            director: directorId,
+            fetchedAt: cached!.fetchedAt,
+            nextDueAt: new Date(fetchedAtMs + syncIntervalMs()).toISOString(),
+            syncIntervalDays: syncIntervalDays(),
+          });
+        }
+      }
+
       await runSync(directorId);
     } else {
       const dirs = allResolvedDirectors();
@@ -49,6 +80,7 @@ export async function GET(req: NextRequest) {
     });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ ok: false, error: msg }, { status: 500 });
+    const status = e instanceof SyncAlreadyRunningError ? 409 : 500;
+    return NextResponse.json({ ok: false, error: msg }, { status });
   }
 }

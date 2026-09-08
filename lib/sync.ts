@@ -38,11 +38,18 @@ import {
   getPersistentStoreLabel,
   type DirectorCacheEntry,
 } from "./snapshot-cache";
-import { syncIntervalDays } from "./sync-schedule";
+import { syncIntervalDays, syncIntervalMs } from "./sync-schedule";
 
 // ── In-process sync guard (one sync at a time per Node.js instance) ─────────
 let syncRunning = false;
 let lastSyncPromise: Promise<void> | null = null;
+
+export class SyncAlreadyRunningError extends Error {
+  constructor() {
+    super("A dashboard sync is already running");
+    this.name = "SyncAlreadyRunningError";
+  }
+}
 
 export function isSyncRunning(): boolean {
   return syncRunning;
@@ -51,12 +58,31 @@ export function isSyncRunning(): boolean {
 export async function getSyncStatus() {
   const meta = await readMeta();
   const directorsCached = await countCachedDirectors();
+  const now = Date.now();
+  const snapshots = await Promise.all(
+    allResolvedDirectors().map(async (director) => {
+      const entry = await getCachedDirector(director.id);
+      const fetchedAtMs = entry ? new Date(entry.fetchedAt).getTime() : Number.NaN;
+      const ageMs = Number.isFinite(fetchedAtMs) ? now - fetchedAtMs : null;
+      return {
+        director: director.id,
+        fetchedAt: entry?.fetchedAt ?? null,
+        ageMs,
+        overdue: ageMs === null || ageMs >= syncIntervalMs(),
+      };
+    })
+  );
   return {
     running: syncRunning,
     lastSyncAt: meta.lastSyncAt,
     lastSyncDurationMs: meta.lastSyncDurationMs,
     syncError: meta.syncError,
     directorsCached,
+    healthy:
+      !meta.syncError &&
+      directorsCached === snapshots.length &&
+      snapshots.every((snapshot) => !snapshot.overdue),
+    snapshots,
   };
 }
 
@@ -68,7 +94,9 @@ export function triggerSync(directorId?: string): { started: boolean; message: s
   if (syncRunning) {
     return { started: false, message: "Sync already in progress" };
   }
-  lastSyncPromise = runSync(directorId);
+  lastSyncPromise = runSync(directorId).catch((error) => {
+    console.error("[sync] Background sync failed:", error);
+  });
   return { started: true, message: directorId ? `Sync started for ${directorId}` : "Sync started" };
 }
 
@@ -92,7 +120,9 @@ export function triggerSyncSequential(): { started: boolean; message: string } {
   if (syncRunning) {
     return { started: false, message: "Sync already in progress" };
   }
-  lastSyncPromise = runSyncSequential();
+  lastSyncPromise = runSyncSequential().catch((error) => {
+    console.error("[sync] Background sequential sync failed:", error);
+  });
   return { started: true, message: "Sequential sync started (all directors)" };
 }
 
@@ -113,7 +143,7 @@ async function runSyncSequential(): Promise<void> {
  * Omit it to sync all directors sequentially (used locally / manual trigger).
  */
 export async function runSync(directorId?: string): Promise<void> {
-  if (syncRunning) return;
+  if (syncRunning) throw new SyncAlreadyRunningError();
   syncRunning = true;
   const startMs = Date.now();
 
@@ -330,6 +360,7 @@ export async function runSync(directorId?: string): Promise<void> {
       lastSyncDurationMs: Date.now() - startMs,
       syncError: msg,
     });
+    throw e;
   } finally {
     clearApiCache();
     clearLiveCaches();

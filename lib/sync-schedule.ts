@@ -7,11 +7,14 @@ export function syncIntervalDays(): number {
   return 3;
 }
 
+export function syncIntervalMs(): number {
+  return syncIntervalDays() * 24 * 60 * 60 * 1000;
+}
+
 /** When a snapshot is older than this, serve it but trigger a background refresh. */
 export function staleSnapshotMs(): number {
-  const days = syncIntervalDays();
   // Interval + 12 h buffer so we don't re-sync on every page view right after cron.
-  return (days * 24 + 12) * 60 * 60 * 1000;
+  return syncIntervalMs() + 12 * 60 * 60 * 1000;
 }
 
 /** Redis TTL for director snapshots — interval + 4 days so data survives a missed run. */
@@ -19,7 +22,7 @@ export function snapshotKvTtlSeconds(): number {
   return (syncIntervalDays() + 4) * 24 * 60 * 60;
 }
 
-/** Standard cron expression: staggered director syncs every N days at 05:00 UTC. */
+/** Legacy Vercel cron expression for staggered director syncs. */
 export function cronScheduleEveryNDays(minuteOffset = 0): string {
   const days = syncIntervalDays();
   return `${minuteOffset} 5 */${days} * *`;

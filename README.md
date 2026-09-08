@@ -41,8 +41,16 @@ Current implementation notes:
 
 - Project utilization now excludes Scoro activities under **Internal activities (non billable)** and **Non-billable tasks**, keeps Scrum, and divides by mapped team capacity for elapsed weeks in the quarter. Scoro `timeEntries/list` does not expose project id / budget type, so this is the reliable v2 API approximation until the dashboard can read a dedicated Scoro availability/budget report.
 - Escalations are attributed only to teams whose mapped members appear on the Scoro project users list. Team leads are not counted unless they are also listed as members of that team.
-- Director snapshots are served from **Upstash Redis** when `KV_REST_API_URL` and `KV_REST_API_TOKEN` are set (otherwise local file cache, wiped on deploy). A **cron job every 3 days** refreshes all 9 directors from Scoro into Redis (`vercel.json` on Vercel, `render.yaml` cron on Render). Stale snapshots still render immediately and trigger a director-specific background refresh.
+- Director snapshots are served from **Postgres** when `DATABASE_URL` is set, then Upstash Redis when its two KV variables are set, otherwise a local file cache that is wiped on deploy.
+- The scheduler checks all 9 directors daily and refreshes only snapshots at least `SYNC_INTERVAL_DAYS` old (default: 3 days). Daily due checks recover automatically from a missed run; transient conflicts and server failures are retried. Stale snapshots still render immediately and trigger a director-specific background refresh.
 - A database is not required just to make the dashboard reliable. The practical serving model is scheduled Scoro sync -> persisted snapshot -> fast dashboard reads -> visible `updatedAt`/source state. Add a database later for historical trends, audit trails, manual corrections, or report reconciliation.
+
+#### Render cron setup and recovery
+
+1. Apply `render.yaml` as a Blueprint so both `admind-agentic-dashboard` and `sync-all-directors` exist.
+2. Confirm both services use the `dashboard-cron-auth` environment group. Render generates its shared `CRON_SECRET`; separate service-level values must be removed because they override the group and cause HTTP 401.
+3. Confirm the cron schedule is `0 5 * * *` and trigger one manual run after setup. A healthy run ends with `[cron-sync] All directors synced.`; Render marks the run failed if any director could not refresh.
+4. Check `/api/sync` for `lastSyncAt`, `syncError`, and `directorsCached`. Compare individual dashboard `updatedAt` values because the metadata timestamp alone does not prove every director refreshed.
 
 When `SCORO_API_KEY` and `COMPANY_BASE_URL` are set and the API responds successfully, the header shows **Scoro** and the grid is filled from **live Scoro data**:
 

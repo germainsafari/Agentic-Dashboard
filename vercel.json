@@ -1,13 +1,13 @@
 {
   "crons": [
-    { "path": "/api/cron?director=piotr",     "schedule": "0 5 */3 * *" },
-    { "path": "/api/cron?director=marta",     "schedule": "10 5 */3 * *" },
-    { "path": "/api/cron?director=dominika",  "schedule": "20 5 */3 * *" },
-    { "path": "/api/cron?director=michal",    "schedule": "30 5 */3 * *" },
-    { "path": "/api/cron?director=karolina",  "schedule": "40 5 */3 * *" },
-    { "path": "/api/cron?director=jonattas",  "schedule": "50 5 */3 * *" },
-    { "path": "/api/cron?director=krzysztof", "schedule": "0 6 */3 * *" },
-    { "path": "/api/cron?director=maciej",    "schedule": "10 6 */3 * *" },
-    { "path": "/api/cron?director=justyna",   "schedule": "20 6 */3 * *" }
+    { "path": "/api/cron?director=piotr&scheduled=1",     "schedule": "0 5 * * *" },
+    { "path": "/api/cron?director=marta&scheduled=1",     "schedule": "10 5 * * *" },
+    { "path": "/api/cron?director=dominika&scheduled=1",  "schedule": "20 5 * * *" },
+    { "path": "/api/cron?director=michal&scheduled=1",    "schedule": "30 5 * * *" },
+    { "path": "/api/cron?director=karolina&scheduled=1",  "schedule": "40 5 * * *" },
+    { "path": "/api/cron?director=jonattas&scheduled=1",  "schedule": "50 5 * * *" },
+    { "path": "/api/cron?director=krzysztof&scheduled=1", "schedule": "0 6 * * *" },
+    { "path": "/api/cron?director=maciej&scheduled=1",    "schedule": "10 6 * * *" },
+    { "path": "/api/cron?director=justyna&scheduled=1",   "schedule": "20 6 * * *" }
   ]
 }

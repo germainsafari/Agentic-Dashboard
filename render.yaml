@@ -1,3 +1,11 @@
+envVarGroups:
+  # One shared value prevents the web service and cron worker from drifting
+  # to different secrets. Render generates the value once for the group.
+  - name: dashboard-cron-auth
+    envVars:
+      - key: CRON_SECRET
+        generateValue: true
+
 services:
   - type: web
     name: admind-agentic-dashboard
@@ -44,17 +52,17 @@ services:
         sync: false
 
       # ── Cron auth (recommended) ───────────────────────────────────────────
-      - key: CRON_SECRET
-        sync: false
+      - fromGroup: dashboard-cron-auth
 
       # ── Next.js ────────────────────────────────────────────────────────────
       - key: NODE_ENV
         value: production
 
-  # Full Scoro refresh every 3 days — syncs all 9 directors into Postgres.
+  # Check daily and refresh only snapshots that are at least 3 days old.
+  # Daily checks self-heal after a missed/failed run.
   - type: cron
     name: sync-all-directors
-    schedule: "0 5 */3 * *"
+    schedule: "0 5 * * *"
     runtime: node
     buildCommand: pnpm install
     startCommand: node scripts/cron-sync-all.mjs
@@ -64,5 +72,4 @@ services:
           type: web
           name: admind-agentic-dashboard
           property: host
-      - key: CRON_SECRET
-        sync: false
+      - fromGroup: dashboard-cron-auth

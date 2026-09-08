@@ -40,6 +40,8 @@ const DIRECTORS = [
 
 const PAUSE_MS = 60_000;
 const FETCH_TIMEOUT_MS = 15 * 60 * 1000; // per director — Scoro sync can take 5–10 min
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 2 * 60 * 1000;
 
 function httpGet(url, headers = {}) {
   return new Promise((resolve, reject) => {
@@ -80,6 +82,12 @@ if (!base) {
   console.error("[cron-sync] APP_BASE_URL is required");
   process.exit(1);
 }
+if (process.env.RENDER && !secret) {
+  console.error(
+    "[cron-sync] CRON_SECRET is missing. Attach the shared dashboard-cron-auth environment group to this cron service."
+  );
+  process.exit(1);
+}
 
 const headers = secret ? { Authorization: `Bearer ${secret}` } : {};
 
@@ -87,15 +95,44 @@ const directors = process.env.CRON_DIRECTORS?.trim()
   ? process.env.CRON_DIRECTORS.split(",").map((d) => d.trim()).filter(Boolean)
   : DIRECTORS;
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const failures = [];
+
 for (const director of directors) {
-  const url = `${base}/api/cron?director=${encodeURIComponent(director)}`;
-  console.log(`[cron-sync] Syncing ${director}…`);
-  const res = await httpGet(url, headers);
-  console.log(`[cron-sync] ${director} → HTTP ${res.status}: ${res.body.slice(0, 200)}`);
-  if (!res.ok) process.exit(1);
-  if (director !== directors[directors.length - 1]) {
-    await new Promise((r) => setTimeout(r, PAUSE_MS));
+  const url = `${base}/api/cron?director=${encodeURIComponent(director)}&scheduled=1`;
+  let succeeded = false;
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      console.log(`[cron-sync] Syncing ${director} (attempt ${attempt}/${MAX_ATTEMPTS})…`);
+      const res = await httpGet(url, headers);
+      console.log(`[cron-sync] ${director} → HTTP ${res.status}: ${res.body.slice(0, 300)}`);
+
+      if (res.ok) {
+        succeeded = true;
+        break;
+      }
+
+      const retryable = res.status === 409 || res.status === 429 || res.status >= 500;
+      if (!retryable || attempt === MAX_ATTEMPTS) break;
+    } catch (error) {
+      console.error(`[cron-sync] ${director} request failed:`, error);
+      if (attempt === MAX_ATTEMPTS) break;
+    }
+
+    console.log(`[cron-sync] Retrying ${director} in ${RETRY_DELAY_MS / 1000}s…`);
+    await sleep(RETRY_DELAY_MS);
   }
+
+  if (!succeeded) failures.push(director);
+  if (director !== directors[directors.length - 1]) {
+    await sleep(PAUSE_MS);
+  }
+}
+
+if (failures.length > 0) {
+  console.error(`[cron-sync] Failed directors: ${failures.join(", ")}`);
+  process.exit(1);
 }
 
 console.log("[cron-sync] All directors synced.");

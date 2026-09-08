@@ -49,7 +49,7 @@ Current implementation notes:
 
 1. Apply `render.yaml` as a Blueprint so both `admind-agentic-dashboard` and `sync-all-directors` exist.
 2. Confirm both services use the `dashboard-cron-auth` environment group. Render generates its shared `CRON_SECRET`; separate service-level values must be removed because they override the group and cause HTTP 401.
-3. Confirm the cron schedule is `0 5 * * *` and trigger one manual run after setup. A healthy run ends with `[cron-sync] All directors synced.`; Render marks the run failed if any director could not refresh.
+3. Confirm the cron schedule is `0 5 * * *` and trigger one manual run after setup. A healthy run ends with `[cron-sync] All directors synced.`; each director logs either `✓ fresh`, `✓ skipped`, or waits for background sync via `/api/sync` polling.
 4. Check `/api/sync` for `lastSyncAt`, `syncError`, and `directorsCached`. Compare individual dashboard `updatedAt` values because the metadata timestamp alone does not prove every director refreshed.
 
 When `SCORO_API_KEY` and `COMPANY_BASE_URL` are set and the API responds successfully, the header shows **Scoro** and the grid is filled from **live Scoro data**:

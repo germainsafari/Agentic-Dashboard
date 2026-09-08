@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runSync, SyncAlreadyRunningError } from "@/lib/sync";
+import { runSync, SyncAlreadyRunningError, isSyncRunning, triggerSync } from "@/lib/sync";
 import { allResolvedDirectors } from "@/lib/directors";
 import {
   getCachedDirector,
@@ -21,7 +21,8 @@ export const maxDuration = 800;
  *
  * Usage:
  *   GET /api/cron                    — sync all directors sequentially (may timeout)
- *   GET /api/cron?director=marta     — sync a single director (preferred for cron)
+ *   GET /api/cron?director=marta&scheduled=1 — due-check + async start (Render cron)
+ *   GET /api/cron?director=marta     — sync a single director (blocking)
  *
  * Auth: Bearer token via CRON_SECRET env var (optional but recommended).
  */
@@ -61,6 +62,45 @@ export async function GET(req: NextRequest) {
             syncIntervalDays: syncIntervalDays(),
           });
         }
+
+        // Scheduled cron: start sync in the background and return immediately so
+        // the caller can poll /api/sync instead of holding an HTTP connection
+        // for 10–20 minutes (which caused client timeouts and 409 cascades).
+        if (isSyncRunning()) {
+          return NextResponse.json(
+            {
+              ok: true,
+              status: "busy",
+              director: directorId,
+              message: "Another sync is already running",
+            },
+            { status: 202 }
+          );
+        }
+
+        const started = triggerSync(directorId);
+        if (!started.started) {
+          return NextResponse.json(
+            {
+              ok: true,
+              status: "busy",
+              director: directorId,
+              message: started.message,
+            },
+            { status: 202 }
+          );
+        }
+
+        return NextResponse.json(
+          {
+            ok: true,
+            status: "started",
+            director: directorId,
+            message: started.message,
+            syncIntervalDays: syncIntervalDays(),
+          },
+          { status: 202 }
+        );
       }
 
       await runSync(directorId);

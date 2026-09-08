@@ -1,8 +1,12 @@
 /**
  * Render (or manual) cron runner: sync every director sequentially via /api/cron.
  *
+ * Scheduled mode starts each director sync in the background (HTTP 202) and polls
+ * /api/sync until the snapshot is fresh — avoids 15-minute client timeouts and
+ * 409 errors when a long sync is still running.
+ *
  * Env:
- *   APP_BASE_URL     — e.g. https://admind-agentic-dashboard.onrender.com
+ *   APP_BASE_URL     — e.g. https://agentic-dashboard.onrender.com
  *   CRON_SECRET      — optional Bearer token (recommended in production)
  *   CRON_DIRECTORS   — optional comma list to sync a subset (e.g. piotr,marta)
  */
@@ -38,18 +42,19 @@ const DIRECTORS = [
   "justyna",
 ];
 
-const PAUSE_MS = 60_000;
-const FETCH_TIMEOUT_MS = 15 * 60 * 1000; // per director — Scoro sync can take 5–10 min
-const MAX_ATTEMPTS = 3;
-const RETRY_DELAY_MS = 2 * 60 * 1000;
+const TRIGGER_TIMEOUT_MS = 120_000;
+const STATUS_TIMEOUT_MS = 30_000;
+const POLL_INTERVAL_MS = 30_000;
+const DIRECTOR_WAIT_MS = 25 * 60 * 1000;
+const MIN_TRIGGER_GAP_MS = 60_000;
 
-function httpGet(url, headers = {}) {
+function httpGet(url, headers = {}, timeoutMs = STATUS_TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
     const lib = u.protocol === "https:" ? https : http;
     const req = lib.request(
       u,
-      { method: "GET", headers, timeout: FETCH_TIMEOUT_MS },
+      { method: "GET", headers, timeout: timeoutMs },
       (res) => {
         let body = "";
         res.on("data", (chunk) => {
@@ -65,11 +70,19 @@ function httpGet(url, headers = {}) {
       }
     );
     req.on("timeout", () => {
-      req.destroy(new Error(`Request timed out after ${FETCH_TIMEOUT_MS}ms`));
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
     });
     req.on("error", reject);
     req.end();
   });
+}
+
+function parseJson(body) {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
 }
 
 let base = process.env.APP_BASE_URL?.replace(/\/$/, "");
@@ -96,37 +109,82 @@ const directors = process.env.CRON_DIRECTORS?.trim()
   : DIRECTORS;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function fetchSyncStatus() {
+  const res = await httpGet(`${base}/api/sync`, headers, STATUS_TIMEOUT_MS);
+  if (!res.ok) {
+    throw new Error(`/api/sync returned HTTP ${res.status}`);
+  }
+  const status = parseJson(res.body);
+  if (!status) {
+    throw new Error("/api/sync returned invalid JSON");
+  }
+  return status;
+}
+
+async function syncDirector(director) {
+  const cronUrl = `${base}/api/cron?director=${encodeURIComponent(director)}&scheduled=1`;
+  const deadline = Date.now() + DIRECTOR_WAIT_MS;
+  let lastTriggerAt = 0;
+
+  console.log(`[cron-sync] Processing ${director}…`);
+
+  while (Date.now() < deadline) {
+    const status = await fetchSyncStatus();
+    const snap = status.snapshots?.find((entry) => entry.director === director);
+
+    if (snap && !snap.overdue) {
+      console.log(`[cron-sync] ${director} ✓ fresh (${snap.fetchedAt})`);
+      return true;
+    }
+
+    const now = Date.now();
+    if (!status.running && now - lastTriggerAt >= MIN_TRIGGER_GAP_MS) {
+      console.log(`[cron-sync] Triggering ${director}…`);
+      const res = await httpGet(cronUrl, headers, TRIGGER_TIMEOUT_MS);
+      console.log(`[cron-sync] ${director} → HTTP ${res.status}: ${res.body.slice(0, 300)}`);
+
+      lastTriggerAt = now;
+      const body = parseJson(res.body);
+
+      if (res.status === 401) {
+        throw new Error("Unauthorized — check CRON_SECRET matches the web service");
+      }
+
+      if (body?.skipped) {
+        console.log(`[cron-sync] ${director} ✓ skipped (${body.fetchedAt})`);
+        return true;
+      }
+
+      if (res.status === 202 || body?.status === "started" || body?.status === "busy") {
+        // Background sync started or another director is still running — keep polling.
+      } else if (!res.ok) {
+        console.warn(`[cron-sync] ${director} trigger failed (HTTP ${res.status}), will retry`);
+      }
+    } else if (status.running) {
+      console.log(`[cron-sync] ${director}: waiting for in-progress sync…`);
+    }
+
+    if (status.syncError && !status.running) {
+      console.warn(`[cron-sync] last sync error: ${status.syncError}`);
+    }
+
+    await sleep(POLL_INTERVAL_MS);
+  }
+
+  console.error(`[cron-sync] ${director} ✗ timed out after ${DIRECTOR_WAIT_MS / 60000} minutes`);
+  return false;
+}
+
 const failures = [];
 
 for (const director of directors) {
-  const url = `${base}/api/cron?director=${encodeURIComponent(director)}&scheduled=1`;
-  let succeeded = false;
-
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    try {
-      console.log(`[cron-sync] Syncing ${director} (attempt ${attempt}/${MAX_ATTEMPTS})…`);
-      const res = await httpGet(url, headers);
-      console.log(`[cron-sync] ${director} → HTTP ${res.status}: ${res.body.slice(0, 300)}`);
-
-      if (res.ok) {
-        succeeded = true;
-        break;
-      }
-
-      const retryable = res.status === 409 || res.status === 429 || res.status >= 500;
-      if (!retryable || attempt === MAX_ATTEMPTS) break;
-    } catch (error) {
-      console.error(`[cron-sync] ${director} request failed:`, error);
-      if (attempt === MAX_ATTEMPTS) break;
-    }
-
-    console.log(`[cron-sync] Retrying ${director} in ${RETRY_DELAY_MS / 1000}s…`);
-    await sleep(RETRY_DELAY_MS);
-  }
-
-  if (!succeeded) failures.push(director);
-  if (director !== directors[directors.length - 1]) {
-    await sleep(PAUSE_MS);
+  try {
+    const ok = await syncDirector(director);
+    if (!ok) failures.push(director);
+  } catch (error) {
+    console.error(`[cron-sync] ${director} ✗`, error);
+    failures.push(director);
   }
 }
 

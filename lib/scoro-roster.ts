@@ -66,6 +66,15 @@ const JSON_ROSTER_TEAMS = new Set<TeamCode>([
   "PM-PPT",
   "PM-BM",
   "PM-DP",
+  // Scoro has only one combined "Team #Motion" group (id 23) — no separate
+  // Maja/Mohammad sub-groups exist there (confirmed live 2026-09-09 via
+  // userGroups/list). Pointing both dashboard teams at that shared group
+  // gave them the exact same 8 people and the same billable hours. The
+  // static JSON mapping already has clean, correct, non-overlapping
+  // 4-person rosters for each — use those instead until/unless Scoro gets
+  // real distinct sub-groups.
+  "MO - MAJA",
+  "MO - MO",
 ]);
 
 /** Dashboard team code → Scoro `userGroups/list` group_name. */
@@ -77,8 +86,6 @@ const TEAM_GROUP_NAME_OVERRIDES: Record<string, string> = {
   COE: "Team #COE",
   CT: "Creative Technology",
   "DP & BP": "Digital Platforms",
-  "MO - MAJA": "Team #Motion",
-  "MO - MO": "Team #Motion",
   PRINC: "Team #Principles",
   STR: "Team #Therefore Strategy",
   "UBS-SYN": "Team #Design Rescue",

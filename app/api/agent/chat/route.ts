@@ -59,8 +59,8 @@ ${ctx.kpiSummary}
 
 4. PROJECTS IN ESTIMATE (target 80%)
    Formula: round(withinBudget / projectsWithBudgetData × 100)
-   - Same project pool as FTA: design-lead involvement, completed/invoiced, quarter = completion date
-   - withinBudget = projects where actual cost ≤ quoted/estimated cost (from data/budgets.json or project fields)
+   - Same project pool as FTA: design-lead involvement, completed/invoiced, quarter = due date
+   - withinBudget = projects where actual cost (labor + external cost) ≤ the original cost estimate (from data/budgets.json, rebuilt periodically via Scoro's v4 API; or project fields as fallback)
    - projectsWithBudgetData = completed projects in that pool that have any budget data
    - The "won / total" values above are project counts.
 
@@ -104,8 +104,8 @@ ${ctx.kpiSummary}
 ━━━ Data source ━━━
 - Time entries fetched via Scoro REST v2 API: POST timeEntries/list filtered by user_id and date range.
 - Projects for utilization budget-type lookup: team participant projects (exclusive dedup across teams).
-- FTA / Estimate project pool: design-lead task involvement, quarter = completion date (modified_date when closed; v4 completedDate when available).
-- Budget data for "Projects in Estimate" is pre-fetched and stored in data/budgets.json.
+- FTA / Estimate project pool: design-lead task involvement, quarter = due date (v4 dueDate / v2 deadline — neither Scoro API version exposes a real completion-date field).
+- Budget data for "Projects in Estimate" is pre-fetched via Scoro's v4 get_projects(includeBudget) and stored in data/budgets.json, not fetched live every sync.
 
 Rules:
 - When asked "how was X calculated?", always cite the exact formula AND the actual numbers from the KPI data above.

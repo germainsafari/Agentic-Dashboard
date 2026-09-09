@@ -137,17 +137,26 @@ export function userIdsForTeam(
   return [...ids];
 }
 
-async function fetchTimeEntriesForUser(
-  userId: number,
+/**
+ * One call per team instead of one per member. Confirmed live (2026-09-08)
+ * that Scoro's timeEntries/list `user_id` filter accepts an array and
+ * returns the exact union N separate per-user calls would — verified
+ * byte-for-byte against a real 5-person team (1,285 entries, identical
+ * per-user counts, 0 missing/extra either direction). maxPages raised vs
+ * the old per-user 80 since one call now carries a whole team's volume.
+ */
+async function fetchTimeEntriesForUsers(
+  userIds: number[],
   from: string,
   to: string
 ): Promise<ScoroTimeEntry[]> {
+  if (userIds.length === 0) return [];
   return scoroListAllPages<ScoroTimeEntry>("timeEntries/list", {
     filter: {
-      user_id: userId,
+      user_id: userIds,
       time_entry_date: { from_date: from, to_date: to },
     },
-    maxPages: 80,
+    maxPages: 300,
   });
 }
 
@@ -405,14 +414,10 @@ export async function debugUtilizationEntries(
   const activities = await loadActivityLookup();
   const internalIds = await loadInternalNonBillableActivityIds();
 
-  const entriesByUser: ScoroTimeEntry[][] = [];
+  const entries = await fetchTimeEntriesForUsers(userIds, yr.from, yr.to);
   const calEventIds = new Set<number>();
   const taskEventIds = new Set<number>();
-  for (const uid of userIds) {
-    const entries = await fetchTimeEntriesForUser(uid, yr.from, yr.to);
-    entriesByUser.push(entries);
-    collectReferencedEventIds(entries, calEventIds, taskEventIds);
-  }
+  collectReferencedEventIds(entries, calEventIds, taskEventIds);
 
   const resolver = await buildEntryProjectResolver(
     [...calEventIds],
@@ -421,40 +426,38 @@ export async function debugUtilizationEntries(
   );
 
   const rows: UtilizationEntryRow[] = [];
-  for (const entries of entriesByUser) {
-    for (const e of entries) {
-      const dateStr =
-        (typeof e.time_entry_date === "string" && e.time_entry_date) ||
-        (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
-        "";
-      const q = quarterFromIsoDate(dateStr, year);
-      const dur = parseDurationToSeconds(e.duration);
-      const result = classifyUtilizationEntry(e, resolver, activities, internalIds);
-      const projectBudget = resolveEntryProjectBudget(e, resolver);
-      const eventId = Number(e.event_id);
-      const taskCode =
-        e.event_type === "task" ? (resolver.taskBudgetCodeById.get(eventId) ?? null) : null;
+  for (const e of entries) {
+    const dateStr =
+      (typeof e.time_entry_date === "string" && e.time_entry_date) ||
+      (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
+      "";
+    const q = quarterFromIsoDate(dateStr, year);
+    const dur = parseDurationToSeconds(e.duration);
+    const result = classifyUtilizationEntry(e, resolver, activities, internalIds);
+    const projectBudget = resolveEntryProjectBudget(e, resolver);
+    const eventId = Number(e.event_id);
+    const taskCode =
+      e.event_type === "task" ? (resolver.taskBudgetCodeById.get(eventId) ?? null) : null;
 
-      rows.push({
-        timeEntryId: Number(e.time_entry_id) || null,
-        eventId: Number.isFinite(eventId) && eventId > 0 ? eventId : null,
-        eventType: String(e.event_type ?? ""),
-        title: String(e.title ?? ""),
-        quarter: q,
-        durationHours: +(dur / 3600).toFixed(4),
-        resolvedProjectId:
-          e.event_type === "cal"
-            ? (resolver.calendarProjectById.get(eventId) ?? null)
-            : e.event_type === "task"
-              ? (resolver.taskProjectById.get(eventId) ?? null)
-              : null,
-        projectBudgetTypeCode: projectBudget?.budgetTypeCode ?? null,
-        taskBudgetTypeCode: taskCode,
-        effectiveBudgetTypeCode: taskCode ?? projectBudget?.budgetTypeCode ?? null,
-        counted: result.counted,
-        reason: result.reason,
-      });
-    }
+    rows.push({
+      timeEntryId: Number(e.time_entry_id) || null,
+      eventId: Number.isFinite(eventId) && eventId > 0 ? eventId : null,
+      eventType: String(e.event_type ?? ""),
+      title: String(e.title ?? ""),
+      quarter: q,
+      durationHours: +(dur / 3600).toFixed(4),
+      resolvedProjectId:
+        e.event_type === "cal"
+          ? (resolver.calendarProjectById.get(eventId) ?? null)
+          : e.event_type === "task"
+            ? (resolver.taskProjectById.get(eventId) ?? null)
+            : null,
+      projectBudgetTypeCode: projectBudget?.budgetTypeCode ?? null,
+      taskBudgetTypeCode: taskCode,
+      effectiveBudgetTypeCode: taskCode ?? projectBudget?.budgetTypeCode ?? null,
+      counted: result.counted,
+      reason: result.reason,
+    });
   }
   return rows;
 }
@@ -516,10 +519,60 @@ function scheduledSecondsForDay(
   return (Math.max(0, m.weeklyTarget) * 3600) / 5;
 }
 
-export type AbsenceDay = { userId: number; date: string; type: string; value: number };
+const AVAILABILITY_MISMATCH_THRESHOLD_HOURS = 4;
+
+/**
+ * Sanity check, not a calculation input: flags when a member's live Scoro
+ * weekly schedule disagrees with their configured weeklyTarget (roster
+ * config) by more than a few hours. The live schedule always wins for the
+ * actual KPI math (see scheduledSecondsForDay) — this only makes the
+ * disagreement visible in sync logs instead of it silently producing
+ * confusing numbers that only get caught by someone reconciling by hand
+ * (as happened with a part-time member whose Scoro record still showed a
+ * full-time schedule).
+ */
+function logAvailabilityMismatches(team: ResolvedTeam): void {
+  for (const m of team.members) {
+    if (!m.availability) continue;
+    const liveWeeklySec = WEEKDAY_KEYS.reduce((s, k) => s + (m.availability![k] ?? 0), 0);
+    const configuredSec = Math.max(0, m.weeklyTarget) * 3600;
+    const diffHours = Math.abs(liveWeeklySec - configuredSec) / 3600;
+    if (diffHours > AVAILABILITY_MISMATCH_THRESHOLD_HOURS) {
+      console.warn(
+        `[sanity-check] ${team.code} ${m.email}: configured weeklyTarget=${m.weeklyTarget}h/wk ` +
+          `but live Scoro schedule=${(liveWeeklySec / 3600).toFixed(1)}h/wk ` +
+          `(diff ${diffHours.toFixed(1)}h) — the live number is what's actually used for target hours; ` +
+          `verify which one is correct.`
+      );
+    }
+  }
+}
+
+export type AbsenceDay = {
+  userId: number;
+  date: string;
+  type: string;
+  value: number;
+  recordId: number;
+};
 
 let _orgTimeOffs: AbsenceDay[] | null = null;
 let _orgTimeOffsYear: number | null = null;
+let _orgTimeOffsComputedAt: number | null = null;
+// Same reasoning and TTL as ESCALATIONS_CACHE_TTL_MS below: this is one
+// org-wide crawl whose result doesn't depend on which director's sync
+// triggered it, so it must survive across the 9 separate per-director cron
+// calls, not just across teams within a single director (which the
+// pre-existing _orgTimeOffs/_orgTimeOffsYear pair already handled). Kept
+// out of clearLiveCaches() for the same reason the escalation cache is.
+const ORG_TIMEOFFS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+/** Explicit cache-buster, mirroring clearEscalationsCache(). */
+export function clearOrgTimeOffsCache(): void {
+  _orgTimeOffs = null;
+  _orgTimeOffsYear = null;
+  _orgTimeOffsComputedAt = null;
+}
 
 /**
  * All booked time off org-wide for the KPI year, via Scoro v2's `timeOffs/list`
@@ -534,7 +587,14 @@ let _orgTimeOffsYear: number | null = null;
  * it, which is out of scope for the billable-target calculation.
  */
 async function loadOrgTimeOffs(year: number): Promise<AbsenceDay[]> {
-  if (_orgTimeOffs && _orgTimeOffsYear === year) return _orgTimeOffs;
+  if (
+    _orgTimeOffs &&
+    _orgTimeOffsYear === year &&
+    _orgTimeOffsComputedAt != null &&
+    Date.now() - _orgTimeOffsComputedAt < ORG_TIMEOFFS_CACHE_TTL_MS
+  ) {
+    return _orgTimeOffs;
+  }
 
   const { from, to } = yearRange(year);
   const rows = await scoroListAllPages<Record<string, unknown>>("timeOffs/list", {
@@ -546,6 +606,7 @@ async function loadOrgTimeOffs(year: number): Promise<AbsenceDay[]> {
   for (const r of rows) {
     const type = String(r.type ?? "");
     if (type === "extra_availability") continue;
+    const recordId = Number(r.id);
 
     const usersDates = Array.isArray(r.usersDates) ? r.usersDates : [];
     for (const ud of usersDates as Record<string, unknown>[]) {
@@ -555,13 +616,14 @@ async function loadOrgTimeOffs(year: number): Promise<AbsenceDay[]> {
       for (const d of dates as Record<string, unknown>[]) {
         const date = String(d.date ?? "");
         if (!date) continue;
-        out.push({ userId, date, type, value: Number(d.value ?? 0) });
+        out.push({ userId, date, type, value: Number(d.value ?? 0), recordId });
       }
     }
   }
 
   _orgTimeOffs = out;
   _orgTimeOffsYear = year;
+  _orgTimeOffsComputedAt = Date.now();
   console.log(`[timeoff] Loaded ${out.length} org-wide absence-days for ${year}`);
   return out;
 }
@@ -586,6 +648,8 @@ export async function aggregateTimeForTeam(
   projectsForUtilization: ScoroProject[] = [],
   previousDebug?: PreviousUtilBillableDebug
 ): Promise<QuarterAgg> {
+  logAvailabilityMismatches(team);
+
   const agg = emptyQuarterAgg();
   const yr = yearRange(year);
   const asOfIso = utilizationAsOfIso(year);
@@ -648,13 +712,30 @@ export async function aggregateTimeForTeam(
     if (id != null) idToMember.set(id, m);
   }
   // A single day can appear in more than one time-off record (e.g. a 5-day
-  // vacation block plus a separately-logged national holiday inside it) —
-  // dedupe by user+date first so overlapping records don't double-subtract.
+  // vacation block plus a separately-logged national holiday inside it, or
+  // two genuinely duplicate bookings) — dedupe by user+date first so
+  // overlapping records don't double-subtract. Logged when it happens (not
+  // just silently absorbed) since a genuine duplicate booking is a real
+  // Scoro data-quality issue worth someone cleaning up, even though this
+  // dedup already protects the calculation from it.
   const absencesByUserDate = new Map<string, AbsenceDay>();
   for (const a of await fetchTimeOffForUserIds(userIds, year)) {
     const key = `${a.userId}|${a.date}`;
     const existing = absencesByUserDate.get(key);
-    if (!existing || (existing.value !== -1 && (a.value === -1 || a.value > existing.value))) {
+    if (!existing) {
+      absencesByUserDate.set(key, a);
+      continue;
+    }
+    if (existing.recordId !== a.recordId) {
+      const member = idToMember.get(a.userId);
+      console.warn(
+        `[sanity-check] ${team.code} ${member?.email ?? a.userId} has overlapping time-off ` +
+          `bookings on ${a.date}: record ${existing.recordId} (${existing.type}) and ` +
+          `record ${a.recordId} (${a.type}) both claim this day — only one is counted, ` +
+          `but the duplicate booking itself is worth cleaning up in Scoro.`
+      );
+    }
+    if (existing.value !== -1 && (a.value === -1 || a.value > existing.value)) {
       absencesByUserDate.set(key, a);
     }
   }
@@ -663,6 +744,12 @@ export async function aggregateTimeForTeam(
     if (!member) continue;
     const q = quarterFromIsoDate(a.date, year);
     if (!q || closed.has(q)) continue;
+    // A future booking later in the still-open quarter (e.g. vacation booked
+    // for next week) must not be subtracted yet — the availability loop above
+    // never added those future days to availSec in the first place (it stops
+    // at asOfIso), so subtracting their absence here would understate target
+    // hours for time that hasn't happened yet.
+    if (a.date > asOfIso) continue;
     const scheduled = scheduledSecondsForDay(member, a.date);
     const claimed = a.value === -1 ? scheduled : Math.max(0, a.value);
     agg[q].absenceSec += Math.min(claimed, scheduled);
@@ -671,20 +758,16 @@ export async function aggregateTimeForTeam(
     agg[q].targetSec = Math.max(0, agg[q].availSec - agg[q].absenceSec);
   }
 
-  // Fetch each user's entries once, keep them in memory for this single team
-  // (at most a handful of people), and collect exactly which calendar/task
-  // event_ids need resolving — no full-year bulk crawl, no double-fetch.
-  // Narrowed to the earliest open quarter's start (not the full year) since
-  // closed quarters' entries are already accounted for above.
+  // Fetch the whole team's entries in one call (see fetchTimeEntriesForUsers)
+  // and collect exactly which calendar/task event_ids need resolving — no
+  // full-year bulk crawl, no double-fetch. Narrowed to the earliest open
+  // quarter's start (not the full year) since closed quarters' entries are
+  // already accounted for above.
   const fetchFrom = open.length > 0 ? quarterRange(year, open[0]).from : yr.to;
-  const entriesByUser: ScoroTimeEntry[][] = [];
+  const entries = await fetchTimeEntriesForUsers(userIds, fetchFrom, yr.to);
   const calEventIds = new Set<number>();
   const taskEventIds = new Set<number>();
-  for (const uid of userIds) {
-    const entries = await fetchTimeEntriesForUser(uid, fetchFrom, yr.to);
-    entriesByUser.push(entries);
-    collectReferencedEventIds(entries, calEventIds, taskEventIds);
-  }
+  collectReferencedEventIds(entries, calEventIds, taskEventIds);
 
   const resolver = await buildEntryProjectResolver(
     [...calEventIds],
@@ -692,21 +775,50 @@ export async function aggregateTimeForTeam(
     projectsForUtilization
   );
 
-  for (const entries of entriesByUser) {
-    for (const e of entries) {
-      const dateStr =
-        (typeof e.time_entry_date === "string" && e.time_entry_date) ||
-        (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
-        "";
-      const q = quarterFromIsoDate(dateStr, year);
-      if (!q || closed.has(q)) continue;
-      const dur = parseDurationToSeconds(e.duration);
-      const bill = parseDurationToSeconds(e.billable_duration ?? "00:00:00");
-      agg[q].durationSec += dur;
-      agg[q].billableSec += bill;
-      if (classifyUtilizationEntry(e, resolver, activities, internalIds).counted) {
-        agg[q].utilizationSec += dur;
-      }
+  const unresolvedSecByQuarter = new Map<Quarter, number>();
+  for (const e of entries) {
+    const dateStr =
+      (typeof e.time_entry_date === "string" && e.time_entry_date) ||
+      (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
+      "";
+    const q = quarterFromIsoDate(dateStr, year);
+    if (!q || closed.has(q)) continue;
+    // An entry logged/scheduled for later in the still-open quarter (e.g. a
+    // calendar block for next week) hasn't happened yet and must not count
+    // as worked time — the availability loop above already stops at
+    // asOfIso for the same reason. Without this, a person's future-dated
+    // calendar entries inflate this quarter's utilization numerator for
+    // days that haven't occurred (confirmed live 2026-09-08: 43h of
+    // qualifying time already logged for Sep 9-30 was being counted in
+    // Q3's numerator on Sep 8).
+    if (dateStr > asOfIso) continue;
+    const dur = parseDurationToSeconds(e.duration);
+    const bill = parseDurationToSeconds(e.billable_duration ?? "00:00:00");
+    agg[q].durationSec += dur;
+    agg[q].billableSec += bill;
+    const result = classifyUtilizationEntry(e, resolver, activities, internalIds);
+    if (result.counted) {
+      agg[q].utilizationSec += dur;
+    } else if (result.reason === "unresolvedProject") {
+      unresolvedSecByQuarter.set(q, (unresolvedSecByQuarter.get(q) ?? 0) + dur);
+    }
+  }
+
+  // Sanity check: an entry whose calendar/task event never resolved to a
+  // project is silently excluded from utilization (neither counted nor
+  // logged elsewhere) — fine occasionally, but a large share pointing to
+  // unresolvable data is worth surfacing rather than quietly under-counting
+  // real work.
+  const UNRESOLVED_SHARE_THRESHOLD = 0.05;
+  for (const q of open) {
+    const unresolvedSec = unresolvedSecByQuarter.get(q) ?? 0;
+    if (agg[q].durationSec > 0 && unresolvedSec / agg[q].durationSec > UNRESOLVED_SHARE_THRESHOLD) {
+      console.warn(
+        `[sanity-check] ${team.code} ${q}: ${(unresolvedSec / 3600).toFixed(1)}h ` +
+          `(${Math.round((100 * unresolvedSec) / agg[q].durationSec)}% of logged time) could not be ` +
+          `resolved to a project and was excluded from utilization — likely time entries linked to ` +
+          `deleted/moved tasks or calendar events.`
+      );
     }
   }
 
@@ -765,14 +877,10 @@ export async function debugUtilizationBreakdown(
   const buckets = {} as Record<Quarter, Record<string, UtilizationBreakdownBucket>>;
   for (const q of QUARTERS) buckets[q] = {};
 
-  const entriesByUser: ScoroTimeEntry[][] = [];
+  const entries = await fetchTimeEntriesForUsers(userIds, yr.from, yr.to);
   const calEventIds = new Set<number>();
   const taskEventIds = new Set<number>();
-  for (const uid of userIds) {
-    const entries = await fetchTimeEntriesForUser(uid, yr.from, yr.to);
-    entriesByUser.push(entries);
-    collectReferencedEventIds(entries, calEventIds, taskEventIds);
-  }
+  collectReferencedEventIds(entries, calEventIds, taskEventIds);
 
   const resolver = await buildEntryProjectResolver(
     [...calEventIds],
@@ -780,23 +888,21 @@ export async function debugUtilizationBreakdown(
     projectsForUtilization
   );
 
-  for (const entries of entriesByUser) {
-    for (const e of entries) {
-      const dateStr =
-        (typeof e.time_entry_date === "string" && e.time_entry_date) ||
-        (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
-        "";
-      const q = quarterFromIsoDate(dateStr, year);
-      if (!q) continue;
-      const dur = parseDurationToSeconds(e.duration);
-      if (dur === 0) continue;
+  for (const e of entries) {
+    const dateStr =
+      (typeof e.time_entry_date === "string" && e.time_entry_date) ||
+      (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
+      "";
+    const q = quarterFromIsoDate(dateStr, year);
+    if (!q) continue;
+    const dur = parseDurationToSeconds(e.duration);
+    if (dur === 0) continue;
 
-      const result = classifyUtilizationEntry(e, resolver, activities, internalIds);
-      const projectBudget = resolveEntryProjectBudget(e, resolver);
-      const effective = projectBudget ? effectiveBudget(e, resolver, projectBudget) : null;
-      const bucketName = result.counted ? `${result.reason}_COUNTED` : result.reason;
-      bump(buckets, q, bucketName, dur, effective?.budgetTypeCode);
-    }
+    const result = classifyUtilizationEntry(e, resolver, activities, internalIds);
+    const projectBudget = resolveEntryProjectBudget(e, resolver);
+    const effective = projectBudget ? effectiveBudget(e, resolver, projectBudget) : null;
+    const bucketName = result.counted ? `${result.reason}_COUNTED` : result.reason;
+    bump(buckets, q, bucketName, dur, effective?.budgetTypeCode);
   }
 
   const out = {} as UtilizationBreakdown;
@@ -1197,7 +1303,7 @@ function loadBudgetCache(): Map<number, BudgetEntry> {
   _budgetCache = new Map();
   try {
     // budgets.json is committed to the repo and available read-only in all
-    // environments (local dev and Vercel's /var/task filesystem).
+    // environments (local dev and Render's filesystem).
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const fs = require("fs") as typeof import("fs");
     // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -1207,18 +1313,12 @@ function loadBudgetCache(): Map<number, BudgetEntry> {
     for (const [id, entry] of Object.entries(raw)) {
       _budgetCache.set(Number(id), entry);
     }
-    console.log(`[budget] Loaded ${_budgetCache.size} project budgets`);
   } catch {
     console.warn("[budget] data/budgets.json not found — Projects in Estimate will show 0%");
   }
   return _budgetCache;
 }
 
-/**
- * "Projects in Estimate" — budget cost vs actual cost.
- * Reads pre-fetched budget data from data/budgets.json (populated via
- * the Scoro v4 API / MCP). Falls back to v2 fields if present.
- */
 function projectNumericId(p: ScoroProject): number {
   // Scoro v2 may return the ID as "project_id" or "id"
   const a = Number(p.project_id);
@@ -1228,14 +1328,14 @@ function projectNumericId(p: ScoroProject): number {
   return NaN;
 }
 
+/** "Projects in Estimate" — cached budget pair (or project fields) vs actual cost. */
 function inEstimateSuccess(p: ScoroProject): boolean {
   if (!isCompletedOrInvoiced(p)) return false;
   const pid = projectNumericId(p);
 
-  const budgets = loadBudgetCache();
-  const b = Number.isFinite(pid) ? budgets.get(pid) : undefined;
-  if (b) {
-    const pair = budgetPairFromCache(b);
+  const cached = Number.isFinite(pid) ? loadBudgetCache().get(pid) : undefined;
+  if (cached) {
+    const pair = budgetPairFromCache(cached);
     if (pair) return withinBudgetCap(pair.cap, pair.used);
   }
 
@@ -1247,36 +1347,23 @@ function inEstimateSuccess(p: ScoroProject): boolean {
 
 function hasEstimateData(p: ScoroProject): boolean {
   const pid = projectNumericId(p);
-  const budgets = loadBudgetCache();
-  const b = Number.isFinite(pid) ? budgets.get(pid) : undefined;
-  if (b && budgetPairFromCache(b)) return true;
+  const cached = Number.isFinite(pid) ? loadBudgetCache().get(pid) : undefined;
+  if (cached && budgetPairFromCache(cached)) return true;
 
   return projectBudgetPair(p) != null;
 }
 
 /**
- * Returns the budgeted / quoted value of a project in CHF for pitch weighting.
- * Priority: budgetedSum from budgets.json → estimatedCost from budgets.json →
- * Scoro project budget fields. Returns 0 when no data is available.
+ * DEAD CODE NOTE: this feeds computeProjectKpisByQuarter's own newBizWin/
+ * existingWin, which is itself never read — loadTeamBundleFromScoro uses
+ * computePitchKpisFromTasks's output for those KPIs instead (weighted by
+ * the task's own tag, not project budget value). Kept only so that block
+ * still compiles; not worth deleting in this pass since it's inert either
+ * way. Returns the project's own v2 budget field if present, else 0.
  */
 function projectBudgetValue(p: ScoroProject): number {
-  const pid = projectNumericId(p);
-  const budgets = loadBudgetCache();
-  const b = Number.isFinite(pid) ? budgets.get(pid) : undefined;
-  if (b) {
-    const bs = b.budgetedSum;
-    if (typeof bs === "number" && Number.isFinite(bs) && bs > 0) return bs;
-    const ec = b.estimatedCost;
-    if (typeof ec === "number" && Number.isFinite(ec) && ec > 0) return ec;
-  }
-  const cap = Number(
-    (p as { budget_cost?: unknown }).budget_cost ??
-      (p as { estimated_cost?: unknown }).estimated_cost ??
-      (p as { project_budget?: unknown }).project_budget ??
-      (p as { total_budget?: unknown }).total_budget ??
-      0
-  );
-  return Number.isFinite(cap) && cap > 0 ? cap : 0;
+  const fromProject = projectBudgetPair(p);
+  return fromProject?.cap ?? 0;
 }
 
 /**
@@ -1339,10 +1426,10 @@ export async function fetchProjectsForTeamUserIds(
   });
 }
 
-export function computeProjectKpisByQuarter(
+export async function computeProjectKpisByQuarter(
   projects: ScoroProject[],
   year: number
-): {
+): Promise<{
   fta: Record<Quarter, number>;
   estimate: Record<Quarter, number>;
   newBizWin: Record<Quarter, number>;
@@ -1355,7 +1442,7 @@ export function computeProjectKpisByQuarter(
     newBizWin: Record<Quarter, { numerator: number; denominator: number }>;
     existingWin: Record<Quarter, { numerator: number; denominator: number }>;
   };
-} {
+}> {
   const zeros = () =>
     Object.fromEntries(QUARTERS.map((q) => [q, 0])) as Record<Quarter, number>;
   const zeroCounts = () =>
@@ -1829,34 +1916,42 @@ async function fetchOpenTasksForLead(leadId: number): Promise<ScoroTask[]> {
 }
 
 /**
- * All tasks (open + completed) linked to the design lead, bounded to modified
- * since Jan 1 of the PRIOR year. Unbounded would mean re-fetching a multi-year
- * lead's entire task history (600+ tasks) on every sync even though only
- * projects completing in the current KPI year matter — a project that
- * started last year and completed this year still has its start-of-work task
- * modified within this window, so nothing this year's FTA/estimate KPIs need
- * is excluded.
+ * All tasks (open + completed) linked to any of the given design leads
+ * (current + former, e.g. a lead who has since left the company but whose
+ * historical completed projects should still count — see
+ * leadUserIdsForTeam), bounded to modified since Jan 1 of the PRIOR year.
+ * Unbounded would mean re-fetching a multi-year lead's entire task history
+ * (600+ tasks) on every sync even though only projects completing in the
+ * current KPI year matter — a project that started last year and completed
+ * this year still has its start-of-work task modified within this window,
+ * so nothing this year's FTA/estimate KPIs need is excluded.
  */
-async function fetchAllTasksForLead(leadId: number, year: number): Promise<ScoroTask[]> {
+async function fetchAllTasksForLead(leadIds: number[], year: number): Promise<ScoroTask[]> {
   const seen = new Set<number>();
   const merged: ScoroTask[] = [];
   const modified_date = { from_date: `${year - 1}-01-01`, to_date: yearRange(year).to };
 
-  for (const key of LEAD_OPEN_TASK_FILTER_KEYS) {
-    const tasks = await scoroListAllPages<ScoroTask>("tasks/list", {
-      filter: { [key]: leadId, modified_date },
-      detailed: true,
-      maxPages: 40,
-    });
-    for (const t of tasks) {
-      const id = stableTaskEventId(t);
-      if (id != null && seen.has(id)) continue;
-      if (id != null) seen.add(id);
-      merged.push(t);
+  // Looped per lead id (not one array-valued filter call) — an array value
+  // wasn't verified to behave correctly for these particular filter keys,
+  // and this only ever runs with more than one id for a team mid-handoff
+  // between leads, so the extra calls are rare and cheap.
+  for (const leadId of leadIds) {
+    for (const key of LEAD_OPEN_TASK_FILTER_KEYS) {
+      const tasks = await scoroListAllPages<ScoroTask>("tasks/list", {
+        filter: { [key]: leadId, modified_date },
+        detailed: true,
+        maxPages: 40,
+      });
+      for (const t of tasks) {
+        const id = stableTaskEventId(t);
+        if (id != null && seen.has(id)) continue;
+        if (id != null) seen.add(id);
+        merged.push(t);
+      }
     }
   }
 
-  return merged.filter((t) => taskAssigneeUserIds(t).includes(leadId));
+  return merged.filter((t) => taskAssigneeUserIds(t).some((id) => leadIds.includes(id)));
 }
 
 function isInternalNonBillableTask(
@@ -2071,10 +2166,37 @@ function resolveEscalationTarget(
   return null;
 }
 
+// ── Org-wide escalation cache ────────────────────────────────────────────
+// resolveEscalationsForOrg does one heavy paginated tasks/list crawl (~4 min
+// measured) across the whole org, whose result is identical no matter which
+// director's sync triggered it. The cron runner syncs directors one at a
+// time via separate POST /api/sync?director=X calls into the same
+// long-running server process — without this cache, the same org-wide crawl
+// gets redone from scratch on every single director: ~38 min of pure
+// duplication per 9-director cron cycle (confirmed live, 2026-09-08).
+// Deliberately NOT cleared by clearLiveCaches() (which runs after every
+// director's sync) — this cache must survive across directors within one
+// cron cycle. The TTL bounds how stale it can get for a much-later ad-hoc
+// single-director resync.
+const ESCALATIONS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6h — comfortably spans one full 9-director cron cycle (~6h measured), short enough that a resync days later never reuses stale escalation routing.
+let _escalationsCache: {
+  year: number;
+  computedAt: number;
+  result: Map<string, MockEscalation[]>;
+} | null = null;
+
+/** Explicit cache-buster — exposed for tests and any future force-refresh
+ * path. Not called by clearLiveCaches(); see comment above. */
+export function clearEscalationsCache(): void {
+  _escalationsCache = null;
+}
+
 /**
  * Finds every escalation-tagged task across the whole org in one pass and
  * resolves each to a target director. Reuses the same `users` list already
  * loaded once per sync run — no separate user fetch.
+ *
+ * Cached org-wide for ESCALATIONS_CACHE_TTL_MS — see the cache block above.
  */
 export async function resolveEscalationsForOrg(
   users: ScoroUser[],
@@ -2082,6 +2204,18 @@ export async function resolveEscalationsForOrg(
 ): Promise<Map<string, MockEscalation[]>> {
   const out = new Map<string, MockEscalation[]>();
   if (users.length === 0) return out;
+
+  if (
+    _escalationsCache &&
+    _escalationsCache.year === year &&
+    Date.now() - _escalationsCache.computedAt < ESCALATIONS_CACHE_TTL_MS
+  ) {
+    const ageS = Math.round((Date.now() - _escalationsCache.computedAt) / 1000);
+    console.log(
+      `[escalations] Reusing org-wide result computed ${ageS}s ago (cached — skipping the tasks/list crawl for this director)`
+    );
+    return _escalationsCache.result;
+  }
 
   const userIdToEmail = new Map<number, string>();
   for (const u of users) userIdToEmail.set(u.id, u.email.toLowerCase());
@@ -2163,6 +2297,7 @@ export async function resolveEscalationsForOrg(
     out.set(target.director.email, list);
   }
 
+  _escalationsCache = { year, computedAt: Date.now(), result: out };
   return out;
 }
 
@@ -2174,6 +2309,25 @@ export function leadUserIdForTeam(
   const email = team.leadEmail.toLowerCase();
   const match = users.find((u) => u.email.toLowerCase() === email);
   return match?.id ?? null;
+}
+
+/** Current lead plus any former leads (see mapping.ts's former_leader_emails)
+ * whose historical projects should still count — used for FTA/Estimate,
+ * which look at completed-project history, not for active/open-task KPIs
+ * (a departed former lead has no legitimate open tasks left to track). */
+export function leadUserIdsForTeam(
+  team: ResolvedTeam,
+  users: ScoroUser[]
+): number[] {
+  const emails = [team.leadEmail, ...(team.formerLeadEmails ?? [])]
+    .filter((e): e is string => !!e)
+    .map((e) => e.toLowerCase());
+  const ids = new Set<number>();
+  for (const email of emails) {
+    const match = users.find((u) => u.email.toLowerCase() === email);
+    if (match) ids.add(match.id);
+  }
+  return [...ids];
 }
 
 const PROJECTS_BY_ID_CHUNK_SIZE = 100;
@@ -2223,13 +2377,13 @@ export async function fetchLeadKpiProjectsForTeam(
   knownProjects: ScoroProject[] = [],
   year: number
 ): Promise<ScoroProject[]> {
-  const leadId = leadUserIdForTeam(team, users);
-  if (leadId == null) {
+  const leadIds = leadUserIdsForTeam(team, users);
+  if (leadIds.length === 0) {
     console.warn(`[kpi:lead] ${team.code}: no Scoro user for design lead ${team.leadEmail ?? "?"}`);
     return [];
   }
 
-  const leadTasks = await fetchAllTasksForLead(leadId, year);
+  const leadTasks = await fetchAllTasksForLead(leadIds, year);
   const projectIds = new Set<number>();
   for (const t of leadTasks) {
     const pid = taskProjectId(t);
@@ -2358,13 +2512,13 @@ export function computePitchKpisFromTasks(
 
 export function clearLiveCaches(): void {
   activityCache = null;
-  _budgetCache = null;
   _offerPrepBookmarkId = undefined;
   _offerPrepIds = null;
   _pitchCandidateTasks = null;
   _pitchCandidateTasksYear = null;
-  _orgTimeOffs = null;
-  _orgTimeOffsYear = null;
+  // _orgTimeOffs is deliberately NOT cleared here — see
+  // ORG_TIMEOFFS_CACHE_TTL_MS above; it needs to survive across directors
+  // within one cron cycle. Use clearOrgTimeOffsCache() to force a refresh.
   clearScoroActivityCaches();
 }
 
@@ -2407,7 +2561,7 @@ export async function loadTeamBundleFromScoro(
     projectsForUtilization ?? projects,
     previousDebug
   );
-  const projKpi = computeProjectKpisByQuarter(projects, year);
+  const projKpi = await computeProjectKpisByQuarter(projects, year);
 
   const { pitchTasks } = await fetchTeamTasks(team, userIds, year);
   const pitchKpi = computePitchKpisFromTasks(pitchTasks, year);

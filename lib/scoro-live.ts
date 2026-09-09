@@ -1253,21 +1253,30 @@ let _budgetCache: Map<number, BudgetEntry> | null = null;
  * not a cost one, and an agency essentially never invoices a client more
  * than quoted — confirmed live 2026-09-09, it was structurally close to
  * always-passing when it was the primary check.
+ *
+ * Requires the cap itself (ec, or bs on fallback) to be > 0 — not just
+ * "either side is nonzero". A project with estimatedCost 0 but actualCost
+ * > 0 has no real estimate on record (a workflow bug — the estimate was
+ * never entered in Scoro), not a project that blew its budget; counting
+ * it as "has estimate data" auto-failed it against a cap of 0 every time.
+ * Confirmed via the CAMPAIGNS spot-check 2026-09-09: 2 of 3 sampled
+ * projects were exactly this case. Skip it entirely (null) instead —
+ * excluded from the pool, not counted as a failure — per user direction
+ * 2026-09-09.
  */
 function budgetPairFromCache(b: BudgetEntry): { cap: number; used: number } | null {
   const ec = b.estimatedCost;
   const ac = b.actualCost;
-  if ((typeof ec === "number" && ec > 0) || (typeof ac === "number" && ac > 0)) {
+  if (typeof ec === "number" && ec > 0 && typeof ac === "number" && Number.isFinite(ac)) {
     return { cap: ec, used: ac };
   }
   const bs = b.budgetedSum;
   const ub = b.usedBudget;
   if (
     typeof bs === "number" &&
-    Number.isFinite(bs) &&
+    bs > 0 &&
     typeof ub === "number" &&
-    Number.isFinite(ub) &&
-    (bs > 0 || ub > 0)
+    Number.isFinite(ub)
   ) {
     return { cap: bs, used: ub };
   }

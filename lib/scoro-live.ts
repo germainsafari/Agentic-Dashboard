@@ -1101,13 +1101,22 @@ export function projectCompletionDateIso(p: ScoroProject): string {
     const v = p[key];
     if (typeof v === "string" && v.length >= 10) return v.slice(0, 10);
   }
+  // Neither v2's projects/list nor v4's get_projects expose a real
+  // completion-date field on any project — verified live 2026-09-09 via an
+  // exhaustive field dump against both API versions for several
+  // completed/invoiced projects. The fields checked above are kept only in
+  // case some project configuration ever populates them. The previous
+  // fallback here was modified_date, which misclassifies a project by
+  // whenever it was last edited for ANY reason (a late invoice, an admin
+  // correction) — confirmed live: 2025-due-date projects were being swept
+  // into the "completed 2026" pool purely because someone touched them in
+  // 2026, roughly tripling the real pool size. Due date is a real,
+  // always-populated field and the intended classifier instead.
   if (isCompletedOrInvoiced(p)) {
-    const v4Modified = (p as { modifiedDateTime?: unknown }).modifiedDateTime;
-    if (typeof v4Modified === "string" && v4Modified.length >= 10) {
-      return v4Modified.slice(0, 10);
-    }
-    if (typeof p.modified_date === "string" && p.modified_date.length >= 10) {
-      return String(p.modified_date).slice(0, 10);
+    const v4Due = (p as { dueDate?: unknown }).dueDate;
+    if (typeof v4Due === "string" && v4Due.length >= 10) return v4Due.slice(0, 10);
+    if (typeof p.deadline === "string" && p.deadline.length >= 10) {
+      return String(p.deadline).slice(0, 10);
     }
   }
   return "";
@@ -1129,8 +1138,22 @@ const BUDGET_EPS = 0.01;
 
 let _budgetCache: Map<number, BudgetEntry> | null = null;
 
-/** Comparable cap vs used for "within estimate" (higher values = more spend). */
+/**
+ * Comparable cap vs used for "within estimate" (higher values = more spend).
+ * estimatedCost/actualCost (labor + external cost) is the real comparison —
+ * did actual cost stay within the original cost estimate. budgetedSum/
+ * usedBudget (quote vs invoiced) is kept only as a last-resort fallback for
+ * an entry that somehow has no cost data at all: it's a billing comparison,
+ * not a cost one, and an agency essentially never invoices a client more
+ * than quoted — confirmed live 2026-09-09, it was structurally close to
+ * always-passing when it was the primary check.
+ */
 function budgetPairFromCache(b: BudgetEntry): { cap: number; used: number } | null {
+  const ec = b.estimatedCost;
+  const ac = b.actualCost;
+  if ((typeof ec === "number" && ec > 0) || (typeof ac === "number" && ac > 0)) {
+    return { cap: ec, used: ac };
+  }
   const bs = b.budgetedSum;
   const ub = b.usedBudget;
   if (
@@ -1141,11 +1164,6 @@ function budgetPairFromCache(b: BudgetEntry): { cap: number; used: number } | nu
     (bs > 0 || ub > 0)
   ) {
     return { cap: bs, used: ub };
-  }
-  const ec = b.estimatedCost;
-  const ac = b.actualCost;
-  if ((typeof ec === "number" && ec > 0) || (typeof ac === "number" && ac > 0)) {
-    return { cap: ec, used: ac };
   }
   return null;
 }

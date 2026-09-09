@@ -38,15 +38,19 @@ describe("isInternalNonBillableActivityId", () => {
 });
 
 describe("projectCompletionQuarter", () => {
-  it("uses modified_date for completed projects in KPI year", () => {
+  it("uses deadline for completed projects in KPI year", () => {
     const q = projectCompletionQuarter(
-      { status: "completed", status_name: "Invoiced", modified_date: "2026-05-15T10:00:00+02:00" },
+      { status: "completed", status_name: "Invoiced", deadline: "2026-05-15" },
       2026
     );
     expect(q).toBe("Q2");
   });
 
-  it("ignores deadline when completion date is available", () => {
+  it("ignores modified_date and uses deadline as the completion signal", () => {
+    // Neither Scoro API version exposes a real completion-date field (confirmed
+    // live) — modified_date reflects any edit, ever, and would misclassify a
+    // project by whenever someone last touched it rather than when it was
+    // actually due. deadline is the intended classifier.
     const q = projectCompletionQuarter(
       {
         status: "completed",
@@ -55,6 +59,6 @@ describe("projectCompletionQuarter", () => {
       },
       2026
     );
-    expect(q).toBe("Q1");
+    expect(q).toBeNull();
   });
 });

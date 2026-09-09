@@ -145,7 +145,7 @@ function prettyTeamName(code: TeamCode): string {
     "PM-2": "PM 02",
     "PM-4": "PM 04",
     "PM-BM": "PM · Brand Mgmt",
-    "PM-DP": "Digital Platform",
+    "PM-DP": "Digital Platform · PM",
     "PM-OTHER": "PM · Cross-client",
     "PM-PPT": "PM · Presentations",
     CAMPAIGNS: "Campaigns",

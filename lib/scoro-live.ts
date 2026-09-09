@@ -1702,14 +1702,30 @@ let _offerPrepIds: Set<number> | null = null;
 let _pitchCandidateTasks: ScoroTask[] | null = null;
 let _pitchCandidateTasksYear: number | null = null;
 
-const TASK_USER_FILTER_KEYS = ["doer_id", "owner_id", "user_id", "assigned_to"] as const;
-/** Open-task discovery for design leads — broader than TASK_USER_FILTER_KEYS alone. */
-const LEAD_OPEN_TASK_FILTER_KEYS = [
-  "doer_id",
-  "assigned_to",
-  "responsible_id",
-  "responsible_user_id",
-] as const;
+// doer_id and user_id confirmed live (2026-09-09) to be no-ops for Scoro's
+// tasks/list: both returned the identical full task set regardless of which
+// real user ID was passed, individually and via array-filter. owner_id and
+// assigned_to were confirmed correctly filtering (exact match between
+// per-ID-looped and array-filtered results).
+const TASK_USER_FILTER_KEYS = ["owner_id", "assigned_to"] as const;
+/**
+ * Task discovery for design leads (FTA/Estimate project pool + open-task
+ * active-project count). doer_id excluded for the confirmed-no-op reason
+ * above. responsible_id/responsible_user_id were dropped after live
+ * verification (2026-09-09): for real design-lead IDs, these two filters
+ * returned company-wide "everyone" internal-ops tasks (e.g. an HR/PX task
+ * with 100+ names in its assignee list) that don't actually name the lead
+ * anywhere on the task — pure noise, confirmed to already be discarded by
+ * this file's own taskAssigneeUserIds() post-filter, at the cost of
+ * ~1,500+ wasted fetched rows per lead (and the multi-page round trips to
+ * fetch them — this alone was most of fetchLeadKpiProjectsForTeam's
+ * 90-160s runtime per team). owner_id was also checked and ruled out: for
+ * these same leads it returned almost no tasks (0-11), since a design
+ * lead is rarely the Scoro "owner" of their own assigned work. assigned_to
+ * is the one key that reflects real, individual task assignment for this
+ * purpose.
+ */
+const LEAD_OPEN_TASK_FILTER_KEYS = ["assigned_to"] as const;
 
 /** Normalize bookmark titles for reliable exact matching (trim, collapse whitespace, lowercase). */
 export function normalizeBookmarkTitle(title: string): string {
@@ -1899,7 +1915,7 @@ async function fetchOpenTasksForLead(leadId: number): Promise<ScoroTask[]> {
   for (const key of LEAD_OPEN_TASK_FILTER_KEYS) {
     const tasks = await scoroListAllPages<ScoroTask>("tasks/list", {
       filter: { [key]: leadId, is_completed: 0 },
-      detailed: true,
+      detailed: false,
       maxPages: 40,
     });
     for (const t of tasks) {
@@ -1925,6 +1941,16 @@ async function fetchOpenTasksForLead(leadId: number): Promise<ScoroTask[]> {
  * current KPI year matter — a project that started last year and completed
  * this year still has its start-of-work task modified within this window,
  * so nothing this year's FTA/estimate KPIs need is excluded.
+ *
+ * detailed: false (not true) — confirmed live that a busy design lead's
+ * task count in this ~21-month window can run into the thousands, well
+ * past detailed:true's page size of 25 (maxPages 40 × 25/page = 1,000
+ * cap). Scoro returns tasks newest-first, so hitting that cap would
+ * silently drop everything older than the 1,000th most recently modified
+ * task. The non-detailed response still carries every field this function
+ * reads (project_id, assigned_to, owner_id, related_users, event_id) —
+ * just without the richer nested objects detailed mode adds — so this
+ * switch is free: same maxPages now covers 4,000 tasks per lead.
  */
 async function fetchAllTasksForLead(leadIds: number[], year: number): Promise<ScoroTask[]> {
   const seen = new Set<number>();
@@ -1939,7 +1965,7 @@ async function fetchAllTasksForLead(leadIds: number[], year: number): Promise<Sc
     for (const key of LEAD_OPEN_TASK_FILTER_KEYS) {
       const tasks = await scoroListAllPages<ScoroTask>("tasks/list", {
         filter: { [key]: leadId, modified_date },
-        detailed: true,
+        detailed: false,
         maxPages: 40,
       });
       for (const t of tasks) {

@@ -192,6 +192,12 @@ export function LayoutRows({
                     {(() => {
                       const pa = stats.projectsAnalyzed as Record<string, number | undefined>;
                       const pitchKeys = new Set(["newBizWin", "existingWin"]);
+                      // Only fta/estimate get a project-count caption at all — utilization
+                      // and billable also have a kpiDebug[quarter] entry (denominator =
+                      // targetSec, hours-in-seconds), which the fallback below would
+                      // otherwise pick up and render as a nonsensical "N projects
+                      // analyzed" for those two cards.
+                      const projectCountKeys = new Set(["fta", "estimate"]);
                       const debugForQuarter =
                         stats.kpiDebug?.[meta.key as keyof typeof stats.kpiDebug]?.[quarter];
                       // Pitch KPIs carry their quarter-specific pool size directly;
@@ -203,7 +209,9 @@ export function LayoutRows({
                       // an older cached snapshot).
                       const n = pitchKeys.has(meta.key)
                         ? (debugForQuarter?.poolSize ?? pa[meta.key])
-                        : (debugForQuarter?.denominator ?? pa[meta.key]);
+                        : projectCountKeys.has(meta.key)
+                          ? (debugForQuarter?.denominator ?? pa[meta.key])
+                          : undefined;
                       const label = pitchKeys.has(meta.key) ? "pitch tasks analyzed" : "projects analyzed";
                       return n != null && n > 0 ? `${n} ${label}` : "";
                     })()}

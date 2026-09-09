@@ -136,7 +136,7 @@ function prettyTeamName(code: TeamCode): string {
   const overrides: Record<string, string> = {
     "MO - MAJA": "Motion — Maja",
     "MO - MO": "Motion — Mohammad",
-    "DP & BP": "Design & Brand Platform",
+    "DP & BP": "Digital Platform",
     FE: "Formula E",
     "UBS-SYN": "Design Rescue",
     UBS_BA: "UBS BA",

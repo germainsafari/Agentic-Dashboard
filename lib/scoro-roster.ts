@@ -80,7 +80,11 @@ const JSON_ROSTER_TEAMS = new Set<TeamCode>([
 /** Dashboard team code → Scoro `userGroups/list` group_name. */
 const TEAM_GROUP_NAME_OVERRIDES: Record<string, string> = {
   ACC: "Team #Accelleron",
-  BA: "Team #Other_BA",
+  // BA ("Brand Advisory") and UBS_BA had their Scoro groups swapped — BA was
+  // pulling "Team #Other_BA" (just Keegan J-M) while UBS_BA pulled the real
+  // Brand Advisory squad in "Team #ABB_BA" (Chojnacki, Zakrzewska, Myk,
+  // Stąpor — and lead Marek Gołębiowski). Corrected 2026-09-10 per user.
+  BA: "Team #ABB_BA",
   CAMPAIGNS: "Team #Campaigns",
   CD: "Team #CDs",
   COE: "Team #COE",
@@ -89,7 +93,7 @@ const TEAM_GROUP_NAME_OVERRIDES: Record<string, string> = {
   PRINC: "Team #Principles",
   STR: "Team #Therefore Strategy",
   "UBS-SYN": "Team #Design Rescue",
-  UBS_BA: "Team #ABB_BA",
+  UBS_BA: "Team #Other_BA",
 };
 
 const EXCLUDED_EMAILS = new Set(

@@ -31,7 +31,7 @@
       "upper_leader_email": "michal.majewski@admindagency.com"
     },
     "BA": {
-      "leader_email": "justyna.dorman@admindagency.com",
+      "leader_email": "marek.golebiowski@admindagency.com",
       "upper_leader_email": "aleksandra.golab@admindagency.com"
     },
     "CAMPAIGNS": {
@@ -59,8 +59,9 @@
       "upper_leader_email": "aleksandra.golab@admindagency.com"
     },
     "FE": {
-      "leader_email": "szymon.skrzypczak@admindagency.com",
-      "upper_leader_email": "piotr.wisniewski@admindagency.com"
+      "leader_email": "maria.dorda@admindagency.com",
+      "upper_leader_email": "piotr.wisniewski@admindagency.com",
+      "former_leader_emails": ["szymon.skrzypczak@admindagency.com"]
     },
     "MO - MAJA": {
       "leader_email": "maja.keder@admindagency.com",
@@ -124,8 +125,9 @@
       "upper_leader_email": "piotr.wisniewski@admindagency.com"
     },
     "UX": {
-      "leader_email": "gabriela.baka@admindagency.com",
-      "upper_leader_email": "jonattas.poltronieri@admindagency.com"
+      "leader_email": "diana.krueger@admindagency.com",
+      "upper_leader_email": "jonattas.poltronieri@admindagency.com",
+      "former_leader_emails": ["gabriela.baka@admindagency.com"]
     },
     "FURTI": {
       "leader_email": "aleksandra.golab@admindagency.com",
@@ -357,7 +359,23 @@
       "name": "Gabriela Baka",
       "email": "gabriela.baka@admindagency.com",
       "team": "UX",
+      "leader_email": "diana.krueger@admindagency.com",
+      "weekly_target": 40.0,
+      "is_team_lead": false
+    },
+    {
+      "name": "Diana Krueger",
+      "email": "diana.krueger@admindagency.com",
+      "team": "UX",
       "leader_email": "jonattas.poltronieri@admindagency.com",
+      "weekly_target": 40.0,
+      "is_team_lead": true
+    },
+    {
+      "name": "Marek Gołębiowski",
+      "email": "marek.golebiowski@admindagency.com",
+      "team": "BA",
+      "leader_email": "aleksandra.golab@admindagency.com",
       "weekly_target": 40.0,
       "is_team_lead": true
     },
@@ -974,9 +992,9 @@
       "name": "Szymon Skrzypczak",
       "email": "szymon.skrzypczak@admindagency.com",
       "team": "FE",
-      "leader_email": "piotr.wisniewski@admindagency.com",
+      "leader_email": "maria.dorda@admindagency.com",
       "weekly_target": 32.0,
-      "is_team_lead": true
+      "is_team_lead": false
     },
     {
       "name": "Sławomir Wygoda",

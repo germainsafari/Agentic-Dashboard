@@ -158,7 +158,7 @@ function prettyTeamName(code: TeamCode): string {
     CT: "Creative Tech",
     UX: "UX",
     CD: "Creative Direction",
-    BA: "Brand Assets",
+    BA: "Brand Advisory",
     PPT: "Presentations",
     FURTI: "Furti",
   };

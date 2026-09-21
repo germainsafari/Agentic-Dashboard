@@ -8,6 +8,7 @@ import { scoroListAllPages, scoroListAllPagesUser, scoroPostUser, resolveScoroUs
 import type { MockEscalation } from "./mock";
 import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, TeamStats } from "./mock";
 import { readMeta, writeMeta } from "./snapshot-cache";
+import type { TeamRosterSnapshot } from "./snapshot-types";
 import {
   activityIdFromEntry,
   isInternalNonBillableActivityId,
@@ -640,19 +641,85 @@ export type PreviousUtilBillableDebug = {
   billable: Record<string, KpiQuarterDebug>;
 };
 
+/**
+ * Point-in-time roster membership: was `email` on `teamCode`'s roster as of
+ * `dateIso`? Resolution is bounded by sync frequency (roster snapshots are
+ * taken once per sync, ~every 3 days) — this finds the most recent snapshot
+ * at or before dateIso and reads its membership; a date older than every
+ * snapshot falls back to the CURRENT roster (best available signal for
+ * entries predating all recorded history, e.g. right after this feature
+ * first ships, or a team with no history yet).
+ *
+ * Exists to fix a real double-count: sync.ts's roster union across quarters
+ * (current ∪ anyone captured on this team's roster in a snapshot taken
+ * during the quarter) is deliberately wide so a mover isn't dropped from
+ * either team's KPIs — but on its own, that union means BOTH the old and
+ * new team fetch a mover's time entries for the WHOLE quarter. Without this
+ * lookup gating aggregateTimeForTeam's target/absence/classification loops
+ * by each day's/entry's actual date, a mover's transition-quarter hours get
+ * double-attributed to both teams. This turns "was ever on the team this
+ * quarter" into "was on the team on this specific day."
+ *
+ * Builds the lookup once per team per sync (not per entry/day) — call once
+ * and reuse the returned function.
+ *
+ * Verified live 2026-09-21 against a real transition (Maria Dorda,
+ * UBS-SYN -> Formula E lead, 2026-07-01): without this gate, both teams'
+ * naive wide-union fetch counted her full Q3 hours (801h combined, exactly
+ * 2x her real 400.5h). With this gate applied, UBS-SYN correctly shows 0h
+ * and Formula E correctly shows 400.5h for Q3 — summing to her real total.
+ */
+export function buildTeamMembershipLookup(
+  teamCode: string,
+  currentEmails: string[],
+  history: TeamRosterSnapshot[]
+): (email: string, dateIso: string) => boolean {
+  const currentSet = new Set(currentEmails.map((e) => e.toLowerCase()));
+  const sorted = [...history]
+    .map((snap) => ({
+      date: snap.syncedAt.slice(0, 10),
+      members: new Set((snap.byTeam[teamCode] ?? []).map((e) => e.toLowerCase())),
+    }))
+    .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+
+  return (email: string, dateIso: string): boolean => {
+    const e = email.toLowerCase();
+    let membership: boolean | null = null;
+    for (const snap of sorted) {
+      if (snap.date > dateIso) break;
+      membership = snap.members.has(e);
+    }
+    return membership ?? currentSet.has(e);
+  };
+}
+
 export async function aggregateTimeForTeam(
   team: ResolvedTeam,
   userIds: number[],
   year: number,
   users: ScoroUser[],
   projectsForUtilization: ScoroProject[] = [],
-  previousDebug?: PreviousUtilBillableDebug
+  previousDebug?: PreviousUtilBillableDebug,
+  /** Optional — see buildTeamMembershipLookup. Omitted by the two row-level
+   * debug/reconciliation exports below, which intentionally show every
+   * requested user's full-quarter data unfiltered. */
+  membershipLookup?: (email: string, dateIso: string) => boolean
 ): Promise<QuarterAgg> {
   logAvailabilityMismatches(team);
 
   const agg = emptyQuarterAgg();
   const yr = yearRange(year);
   const asOfIso = utilizationAsOfIso(year);
+  // Former members (see mapping.ts's former_member_emails) have no positive
+  // membership record once they've left the live Scoro roster — the
+  // membershipLookup fallback (currentSet.has) would resolve them to "not a
+  // member" on every date and silently zero out their real historical
+  // hours. Treat them as always a valid member instead; since they have no
+  // time entries after departing, this only pulls in hours they actually
+  // logged while active, with no risk of phantom future hours.
+  const formerMemberEmails = new Set(
+    (team.formerMemberEmails ?? []).map((e) => e.toLowerCase())
+  );
 
   const activities = await loadActivityLookup();
   const internalIds = await loadInternalNonBillableActivityIds();
@@ -686,6 +753,9 @@ export async function aggregateTimeForTeam(
   // Day-by-day (not weeks × flat weekly target) so a part-timer's non-work
   // weekdays correctly contribute 0, matching their real Scoro schedule.
   // Only for open quarters — closed quarters already have their targetSec.
+  // Gated by membershipLookup per day (not just per current roster) so a
+  // member who joined this team mid-quarter doesn't have pre-join weeks
+  // counted toward this team's target hours — see buildTeamMembershipLookup.
   for (const m of team.members) {
     for (const q of open) {
       const { from, to } = quarterRange(year, q);
@@ -696,7 +766,9 @@ export async function aggregateTimeForTeam(
         d <= new Date(`${end}T00:00:00Z`);
         d.setUTCDate(d.getUTCDate() + 1)
       ) {
-        agg[q].availSec += scheduledSecondsForDay(m, d.toISOString().slice(0, 10));
+        const dateStr = d.toISOString().slice(0, 10);
+        if (membershipLookup && !membershipLookup(m.email, dateStr)) continue;
+        agg[q].availSec += scheduledSecondsForDay(m, dateStr);
       }
     }
   }
@@ -750,6 +822,10 @@ export async function aggregateTimeForTeam(
     // at asOfIso), so subtracting their absence here would understate target
     // hours for time that hasn't happened yet.
     if (a.date > asOfIso) continue;
+    // Same join-date gating as the availability loop above: a pre-join
+    // absence (booked while the member was still on their old team)
+    // mustn't subtract from a target that no longer counts those days.
+    if (membershipLookup && !membershipLookup(member.email, a.date)) continue;
     const scheduled = scheduledSecondsForDay(member, a.date);
     const claimed = a.value === -1 ? scheduled : Math.max(0, a.value);
     agg[q].absenceSec += Math.min(claimed, scheduled);
@@ -775,6 +851,7 @@ export async function aggregateTimeForTeam(
     projectsForUtilization
   );
 
+  const userIdToEmail = new Map(users.map((u) => [u.id, u.email]));
   const unresolvedSecByQuarter = new Map<Quarter, number>();
   for (const e of entries) {
     const dateStr =
@@ -792,6 +869,20 @@ export async function aggregateTimeForTeam(
     // qualifying time already logged for Sep 9-30 was being counted in
     // Q3's numerator on Sep 8).
     if (dateStr > asOfIso) continue;
+    // Gate by roster membership on the entry's own date — without this, a
+    // mover's whole-quarter fetch (see buildTeamMembershipLookup) would have
+    // their pre-move or post-move hours double-counted into both their old
+    // and new team's numerator.
+    if (membershipLookup) {
+      const email = userIdToEmail.get(Number(e.user_id));
+      if (
+        email &&
+        !formerMemberEmails.has(email.toLowerCase()) &&
+        !membershipLookup(email, dateStr)
+      ) {
+        continue;
+      }
+    }
     const dur = parseDurationToSeconds(e.duration);
     const bill = parseDurationToSeconds(e.billable_duration ?? "00:00:00");
     agg[q].durationSec += dur;
@@ -2600,7 +2691,10 @@ export async function loadTeamBundleFromScoro(
   projectsForUtilization?: ScoroProject[],
   projectsForActiveCount?: ScoroProject[],
   activeProjectDetails?: ActiveProjectDetail[],
-  previousDebug?: PreviousUtilBillableDebug
+  previousDebug?: PreviousUtilBillableDebug,
+  /** Optional — see buildTeamMembershipLookup. Forwarded to
+   * aggregateTimeForTeam to fix the mover double-count. */
+  membershipLookup?: (email: string, dateIso: string) => boolean
 ): Promise<TeamStats> {
   if (userIds.length === 0) {
     throw new Error("no_scoro_users");
@@ -2621,7 +2715,8 @@ export async function loadTeamBundleFromScoro(
     year,
     users,
     projectsForUtilization ?? projects,
-    previousDebug
+    previousDebug,
+    membershipLookup
   );
   const projKpi = await computeProjectKpisByQuarter(projects, year);
 

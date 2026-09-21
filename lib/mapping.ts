@@ -21,6 +21,19 @@ export type TeamLeaderEntry = {
    * project a former lead touched and completed before the handoff is still
    * real team history, not something to silently drop. */
   former_leader_emails?: string[];
+  /** Previous regular (non-lead) team members whose historical logged hours
+   * should still count toward this team's utilization/billable KPIs once
+   * they've left the live Scoro roster (e.g. left the company). Unlike
+   * former_leader_emails (permanent project attribution), this just adds
+   * the person's Scoro id back into the roster-derived user set for time
+   * aggregation — since they have no time entries after departing, this
+   * naturally only pulls in the hours they actually logged while active,
+   * with no risk of phantom future hours. See Karolina Dubaj / Team 2,
+   * 2026-09-21. Only needed for JSON-roster teams (no live Scoro group to
+   * read this signal from automatically) — see
+   * inactiveFormerMemberEmailsForTeam in scoro-roster.ts for the automatic
+   * path used by teams with a live Scoro group. */
+  former_member_emails?: string[];
 };
 
 export type MappingFile = {
@@ -60,6 +73,11 @@ export function leaderOfTeam(team: TeamCode): string | undefined {
 /** Former leads whose historical projects should still count for this team. */
 export function formerLeadersOfTeam(team: TeamCode): string[] {
   return MAPPING.team_leader_lookup[team]?.former_leader_emails ?? [];
+}
+
+/** Former regular members whose historical hours should still count for this team. */
+export function formerMembersOfTeam(team: TeamCode): string[] {
+  return MAPPING.team_leader_lookup[team]?.former_member_emails ?? [];
 }
 
 export function leaderNameOfTeam(team: TeamCode): string | undefined {

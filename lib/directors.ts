@@ -1,5 +1,6 @@
 import {
   formerLeadersOfTeam,
+  formerMembersOfTeam,
   leaderNameOfTeam,
   leaderOfTeam,
   membersForTeam,
@@ -117,6 +118,10 @@ export type ResolvedTeam = {
    * completed projects should still count toward this team's FTA/Estimate
    * KPIs — see mapping.ts's former_leader_emails. */
   formerLeadEmails: string[];
+  /** Previous regular members (e.g. someone who left the company) whose
+   * historical logged hours should still count toward this team's
+   * utilization/billable KPIs — see mapping.ts's former_member_emails. */
+  formerMemberEmails: string[];
   people: number;
   members: {
     name: string;
@@ -180,6 +185,7 @@ export function resolveDirector(id: string): ResolvedDirector | null {
       leadEmail: leaderOfTeam(code),
       leadName: leaderNameOfTeam(code),
       formerLeadEmails: formerLeadersOfTeam(code),
+      formerMemberEmails: formerMembersOfTeam(code),
       people: members.length,
       members: members.map((m) => ({
         name: m.name,

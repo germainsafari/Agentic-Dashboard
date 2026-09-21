@@ -23,6 +23,11 @@ export const maxDuration = 800;
  *   GET /api/cron                    — sync all directors sequentially (may timeout)
  *   GET /api/cron?director=marta&scheduled=1 — due-check + async start (Render cron)
  *   GET /api/cron?director=marta     — sync a single director (blocking)
+ *   GET /api/cron?...&force=true     — also re-derive closed quarters, not
+ *                                       just the open one (bypasses the
+ *                                       snapshot_not_due skip too, on the
+ *                                       scheduled path — see runSync's
+ *                                       forceFullRecompute)
  *
  * Auth: Bearer token via CRON_SECRET env var (optional but recommended).
  */
@@ -36,6 +41,7 @@ export async function GET(req: NextRequest) {
 
   const directorId = req.nextUrl.searchParams.get("director") ?? undefined;
   const scheduled = req.nextUrl.searchParams.get("scheduled") === "1";
+  const forceFullRecompute = req.nextUrl.searchParams.get("force") === "true";
   const startMs = Date.now();
 
   try {
@@ -51,7 +57,11 @@ export async function GET(req: NextRequest) {
       if (scheduled) {
         const cached = await getCachedDirector(directorId);
         const fetchedAtMs = cached ? new Date(cached.fetchedAt).getTime() : Number.NaN;
-        if (Number.isFinite(fetchedAtMs) && Date.now() - fetchedAtMs < syncIntervalMs()) {
+        if (
+          !forceFullRecompute &&
+          Number.isFinite(fetchedAtMs) &&
+          Date.now() - fetchedAtMs < syncIntervalMs()
+        ) {
           return NextResponse.json({
             ok: true,
             skipped: true,
@@ -78,7 +88,7 @@ export async function GET(req: NextRequest) {
           );
         }
 
-        const started = triggerSync(directorId);
+        const started = triggerSync(directorId, forceFullRecompute);
         if (!started.started) {
           return NextResponse.json(
             {
@@ -103,11 +113,11 @@ export async function GET(req: NextRequest) {
         );
       }
 
-      await runSync(directorId);
+      await runSync(directorId, forceFullRecompute);
     } else {
       const dirs = allResolvedDirectors();
       for (const dir of dirs) {
-        await runSync(dir.id);
+        await runSync(dir.id, forceFullRecompute);
       }
     }
     return NextResponse.json({

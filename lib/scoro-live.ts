@@ -775,30 +775,38 @@ export async function aggregateTimeForTeam(
   // open quarter for the fetch-window narrowing below to be correct.
   const open = QUARTERS.filter((q) => !closed.has(q));
 
-  // Fetch entries early (moved ahead of the availability loop below) so a
-  // former member's real quarter-level presence can gate their capacity
-  // contribution, not just their numerator hours. Without this, a leaver
-  // who departed BEFORE a given open quarter even started (e.g. left in
-  // March, quarter is Q2/Apr-Jun) would still get a full quarter's worth
-  // of phantom capacity added to the denominator despite having zero real
-  // activity that quarter — confirmed live 2026-09-21: Team 1's Marcelina
-  // Żurek left in March, had zero Q2 hours, but her default 40h/week was
-  // being added to Q2's target regardless, deflating utilization.
+  // Fetch entries early (moved ahead of the availability loop below) so
+  // everyone's real quarter-level presence can gate their capacity
+  // contribution, not just their numerator hours. Without this, anyone
+  // who joined or left a team mid-quarter still gets a full quarter's
+  // worth of phantom capacity added to the denominator for the quarters
+  // they had zero real activity in.
+  //
+  // Applied uniformly to CURRENT members too, not just auto-detected
+  // former ones — confirmed live 2026-09-21 against the Traffic
+  // Management team's own monthly reconciliation spreadsheets: Team 2's
+  // Małgorzata Piwowarczyk (a current live member as of September, but
+  // who only actually joined Team 2 in July) was getting a full April
+  // month of phantom target hours, since the roster-history-based
+  // membershipLookup gate has no real history to fall back on yet (see
+  // buildTeamMembershipLookup) and defaults to "always a member" for any
+  // date with no recorded snapshot. Real per-quarter activity is a more
+  // reliable signal than that empty-history fallback.
   const fetchFrom = open.length > 0 ? quarterRange(year, open[0]).from : yr.to;
   const entries = await fetchTimeEntriesForUsers(userIds, fetchFrom, yr.to);
   const userIdToEmail = new Map(users.map((u) => [u.id, u.email]));
-  const formerMemberActiveQuarters = new Map<string, Set<Quarter>>();
+  const memberActiveQuarters = new Map<string, Set<Quarter>>();
   for (const e of entries) {
     const email = userIdToEmail.get(Number(e.user_id))?.toLowerCase();
-    if (!email || !formerMemberEmails.has(email)) continue;
+    if (!email) continue;
     const dateStr =
       (typeof e.time_entry_date === "string" && e.time_entry_date) ||
       (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
       "";
     const q = quarterFromIsoDate(dateStr, year);
     if (!q) continue;
-    if (!formerMemberActiveQuarters.has(email)) formerMemberActiveQuarters.set(email, new Set());
-    formerMemberActiveQuarters.get(email)!.add(q);
+    if (!memberActiveQuarters.has(email)) memberActiveQuarters.set(email, new Set());
+    memberActiveQuarters.get(email)!.add(q);
   }
 
   // Day-by-day (not weeks × flat weekly target) so a part-timer's non-work
@@ -810,7 +818,7 @@ export async function aggregateTimeForTeam(
   for (const m of [...team.members, ...formerMemberRecords]) {
     const isFormerMember = formerMemberEmails.has(m.email.toLowerCase());
     for (const q of open) {
-      if (isFormerMember && !formerMemberActiveQuarters.get(m.email.toLowerCase())?.has(q)) continue;
+      if (!memberActiveQuarters.get(m.email.toLowerCase())?.has(q)) continue;
       const { from, to } = quarterRange(year, q);
       if (asOfIso < from) continue;
       const end = asOfIso < to ? asOfIso : to;
@@ -877,9 +885,9 @@ export async function aggregateTimeForTeam(
     if (a.date > asOfIso) continue;
     const memberIsFormer = formerMemberEmails.has(member.email.toLowerCase());
     // Same quarter-presence gating as the availability loop above — no
-    // phantom absence-driven target adjustment for a quarter a former
-    // member had zero real activity in.
-    if (memberIsFormer && !formerMemberActiveQuarters.get(member.email.toLowerCase())?.has(q)) {
+    // phantom absence-driven target adjustment for a quarter this member
+    // (current or former) had zero real activity in.
+    if (!memberActiveQuarters.get(member.email.toLowerCase())?.has(q)) {
       continue;
     }
     // Same join-date gating as the availability loop above: a pre-join
@@ -897,7 +905,7 @@ export async function aggregateTimeForTeam(
     agg[q].targetSec = Math.max(0, agg[q].availSec - agg[q].absenceSec);
   }
 
-  // Entries were already fetched above (see formerMemberActiveQuarters) —
+  // Entries were already fetched above (see memberActiveQuarters) —
   // collect exactly which calendar/task event_ids need resolving from them.
   const calEventIds = new Set<number>();
   const taskEventIds = new Set<number>();

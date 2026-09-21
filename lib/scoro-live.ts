@@ -2403,8 +2403,33 @@ export type ActiveProjectsResult = {
 };
 
 /**
- * Completed/invoiced client projects where the design lead had at least one task.
- * Used for FTA and Projects in Estimate (Rafal: same attribution as active projects).
+ * Teams whose FTA/Estimate project pool is attributed to ANY roster
+ * member's task, not just the design lead's. Lead-only attribution works
+ * for a team where one named lead personally touches most of the team's
+ * work, but breaks down for a team like PPT (Presentations) where the
+ * whole roster works exclusively on presentation tasks spread across many
+ * people — confirmed live 2026-09-21: lead-only attribution found 23
+ * completed/invoiced projects across Q1-Q3 for an 11-person team, while
+ * the whole roster's tasks found 589. Per user direction.
+ */
+const TEAM_WIDE_TASK_ATTRIBUTION = new Set<string>(["PPT"]);
+
+/** Scoro user ids for every current roster member of a team (not just the
+ * lead) — used for TEAM_WIDE_TASK_ATTRIBUTION teams' FTA/Estimate pool. */
+function teamMemberUserIds(team: ResolvedTeam, users: ScoroUser[]): number[] {
+  const emails = new Set(team.members.map((m) => m.email.toLowerCase()));
+  const ids = new Set<number>();
+  for (const u of users) {
+    if (emails.has(u.email.toLowerCase())) ids.add(u.id);
+  }
+  return [...ids];
+}
+
+/**
+ * Completed/invoiced client projects where the design lead had at least one
+ * task (or, for TEAM_WIDE_TASK_ATTRIBUTION teams, where ANY roster member
+ * had at least one task). Used for FTA and Projects in Estimate (Rafal:
+ * same attribution as active projects, except for the team-wide teams above).
  */
 export async function fetchLeadKpiProjectsForTeam(
   team: ResolvedTeam,
@@ -2412,7 +2437,9 @@ export async function fetchLeadKpiProjectsForTeam(
   knownProjects: ScoroProject[] = [],
   year: number
 ): Promise<ScoroProject[]> {
-  const leadIds = leadUserIdsForTeam(team, users);
+  const leadIds = TEAM_WIDE_TASK_ATTRIBUTION.has(team.code)
+    ? teamMemberUserIds(team, users)
+    : leadUserIdsForTeam(team, users);
   if (leadIds.length === 0) {
     console.warn(`[kpi:lead] ${team.code}: no Scoro user for design lead ${team.leadEmail ?? "?"}`);
     return [];

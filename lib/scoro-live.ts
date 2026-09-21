@@ -8,6 +8,7 @@ import { scoroListAllPages, scoroListAllPagesUser, scoroPostUser, resolveScoroUs
 import type { MockEscalation } from "./mock";
 import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, TeamStats } from "./mock";
 import { readMeta, writeMeta } from "./snapshot-cache";
+import { weeklyTargetForEmail } from "./scoro-roster";
 import type { TeamRosterSnapshot } from "./snapshot-types";
 import {
   activityIdFromEntry,
@@ -720,6 +721,22 @@ export async function aggregateTimeForTeam(
   const formerMemberEmails = new Set(
     (team.formerMemberEmails ?? []).map((e) => e.toLowerCase())
   );
+  // A former member's real logged hours count toward the numerator (see
+  // above) — without also giving them a fair share of the denominator
+  // (target/capacity), utilization would always come out inflated, since
+  // the ratio would compare "current roster's capacity" against "current
+  // roster's hours + a departed person's hours". Confirmed live
+  // 2026-09-21: Team 4's Q2 came out to 100.6% (clamped to 100%) because
+  // Dominik Wycisło's real historical hours were added to the numerator
+  // with no matching capacity added to the denominator. No per-weekday
+  // Scoro availability is available for a departed member here, so this
+  // uses their flat weekly_target (mapping.ts) as an approximation, same
+  // fallback scheduledSecondsForDay already uses for anyone without one.
+  const formerMemberRecords: ResolvedTeam["members"] = [...formerMemberEmails].map((email) => ({
+    name: email,
+    email,
+    weeklyTarget: weeklyTargetForEmail(email),
+  }));
 
   const activities = await loadActivityLookup();
   const internalIds = await loadInternalNonBillableActivityIds();
@@ -756,7 +773,8 @@ export async function aggregateTimeForTeam(
   // Gated by membershipLookup per day (not just per current roster) so a
   // member who joined this team mid-quarter doesn't have pre-join weeks
   // counted toward this team's target hours — see buildTeamMembershipLookup.
-  for (const m of team.members) {
+  for (const m of [...team.members, ...formerMemberRecords]) {
+    const isFormerMember = formerMemberEmails.has(m.email.toLowerCase());
     for (const q of open) {
       const { from, to } = quarterRange(year, q);
       if (asOfIso < from) continue;
@@ -767,7 +785,7 @@ export async function aggregateTimeForTeam(
         d.setUTCDate(d.getUTCDate() + 1)
       ) {
         const dateStr = d.toISOString().slice(0, 10);
-        if (membershipLookup && !membershipLookup(m.email, dateStr)) continue;
+        if (membershipLookup && !isFormerMember && !membershipLookup(m.email, dateStr)) continue;
         agg[q].availSec += scheduledSecondsForDay(m, dateStr);
       }
     }
@@ -779,7 +797,7 @@ export async function aggregateTimeForTeam(
   // person was ever scheduled to work). Only applied to open quarters.
   const emailToId = new Map(users.map((u) => [u.email.toLowerCase(), u.id]));
   const idToMember = new Map<number, ResolvedTeam["members"][number]>();
-  for (const m of team.members) {
+  for (const m of [...team.members, ...formerMemberRecords]) {
     const id = emailToId.get(m.email.toLowerCase());
     if (id != null) idToMember.set(id, m);
   }
@@ -825,7 +843,14 @@ export async function aggregateTimeForTeam(
     // Same join-date gating as the availability loop above: a pre-join
     // absence (booked while the member was still on their old team)
     // mustn't subtract from a target that no longer counts those days.
-    if (membershipLookup && !membershipLookup(member.email, a.date)) continue;
+    // Former members bypass this the same way they bypass it there.
+    if (
+      membershipLookup &&
+      !formerMemberEmails.has(member.email.toLowerCase()) &&
+      !membershipLookup(member.email, a.date)
+    ) {
+      continue;
+    }
     const scheduled = scheduledSecondsForDay(member, a.date);
     const claimed = a.value === -1 ? scheduled : Math.max(0, a.value);
     agg[q].absenceSec += Math.min(claimed, scheduled);

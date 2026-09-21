@@ -211,6 +211,39 @@ export function resolveTeamRosterFromScoro(
   return { members, source: "scoro" };
 }
 
+/**
+ * Emails of INACTIVE Scoro users who still belong to this team's Scoro
+ * group — i.e. people who left the company (or were otherwise deactivated)
+ * rather than switched teams. Scoro keeps a deactivated user's
+ * user_groups_ids intact (confirmed live 2026-09-21: Karolina Dubaj,
+ * status "inactive", still carries Team #2's group id), so this needs no
+ * manually-maintained "former member" list — it falls out of Scoro's own
+ * data automatically for any future departure.
+ *
+ * Used only to widen the user set for historical time aggregation
+ * (utilization/billable) — never for the roster shown on the dashboard,
+ * which must stay active-members-only (resolveTeamRosterFromScoro above).
+ */
+export function inactiveFormerMemberEmailsForTeam(
+  teamCode: TeamCode,
+  users: ScoroUserDetailed[],
+  groupIdsByName: Map<string, number>
+): string[] {
+  const groupName = scoroGroupNameForTeam(teamCode);
+  if (!groupName) return [];
+  const groupId = groupIdsByName.get(groupName);
+  if (groupId == null) return [];
+
+  return users
+    .filter(
+      (u) =>
+        !u.isActive &&
+        !EXCLUDED_EMAILS.has(u.email) &&
+        u.groupIds.includes(groupId)
+    )
+    .map((u) => u.email);
+}
+
 export function withScoroRoster(
   team: ResolvedTeam,
   members: ResolvedTeam["members"]

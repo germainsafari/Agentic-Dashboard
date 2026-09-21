@@ -4,6 +4,7 @@ import { allResolvedDirectors } from "./directors";
 import { QUARTERS } from "./brand";
 import {
   assignProjectsExclusiveToTeams,
+  buildTeamMembershipLookup,
   clearLiveCaches,
   fetchActiveProjectsForTeam,
   fetchLeadKpiProjectsForTeam,
@@ -17,6 +18,7 @@ import {
 } from "./scoro-live";
 import { clearApiCache } from "./scoro-api";
 import {
+  inactiveFormerMemberEmailsForTeam,
   loadScoroUserGroupIdsByName,
   loadScoroUsersDetailed,
   resolveTeamRosterFromScoro,
@@ -90,11 +92,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ── Trigger helpers ────────────────────────────────────────────────────────
 
-export function triggerSync(directorId?: string): { started: boolean; message: string } {
+export function triggerSync(
+  directorId?: string,
+  forceFullRecompute?: boolean
+): { started: boolean; message: string } {
   if (syncRunning) {
     return { started: false, message: "Sync already in progress" };
   }
-  lastSyncPromise = runSync(directorId).catch((error) => {
+  lastSyncPromise = runSync(directorId, forceFullRecompute).catch((error) => {
     console.error("[sync] Background sync failed:", error);
   });
   return { started: true, message: directorId ? `Sync started for ${directorId}` : "Sync started" };
@@ -141,8 +146,17 @@ async function runSyncSequential(): Promise<void> {
  * Main sync function.
  * Pass a `directorId` to sync a single director (used by Vercel Cron).
  * Omit it to sync all directors sequentially (used locally / manual trigger).
+ * Pass `forceFullRecompute: true` to bypass closed-quarter cache reuse for
+ * this run — every quarter (not just the currently-open one) is re-derived
+ * live from Scoro. Needed because aggregateTimeForTeam otherwise replays a
+ * closed quarter's last-cached numerator/denominator forever, even after a
+ * logic fix (e.g. widening the roster to include a departed member) — a
+ * routine re-sync alone can never correct an already-closed quarter.
  */
-export async function runSync(directorId?: string): Promise<void> {
+export async function runSync(
+  directorId?: string,
+  forceFullRecompute?: boolean
+): Promise<void> {
   if (syncRunning) throw new SyncAlreadyRunningError();
   syncRunning = true;
   const startMs = Date.now();
@@ -210,7 +224,7 @@ export async function runSync(directorId?: string): Promise<void> {
 
     for (const dir of directors) {
       console.log(`[sync] Processing ${dir.name} (${dir.teams.length} teams)...`);
-      const previousEntry = await getCachedDirector(dir.id);
+      const previousEntry = forceFullRecompute ? null : await getCachedDirector(dir.id);
       const previousStatsByTeamCode = new Map(
         (previousEntry?.teamStats ?? []).map((ts) => [ts.team.code, ts.stats])
       );
@@ -245,12 +259,33 @@ export async function runSync(directorId?: string): Promise<void> {
       const assignedExclusive = assignProjectsExclusiveToTeams(teamFetches);
 
       for (const team of dir.teams) {
-        const teamLive = teamLiveByCode.get(team.code) ?? team;
-        rosterHistory[rosterIndex].byTeam[team.code] = teamLive.members.map((m) =>
+        const teamLiveRoster = teamLiveByCode.get(team.code) ?? team;
+        rosterHistory[rosterIndex].byTeam[team.code] = teamLiveRoster.members.map((m) =>
           m.email.toLowerCase()
         );
 
-        const rosterEmails = new Set<string>();
+        // People who left the COMPANY (deactivated in Scoro) rather than
+        // moved teams — Scoro keeps a deactivated user's group membership
+        // intact, so this falls out of live data automatically, no manual
+        // mapping edit needed per departure (see Karolina Dubaj / Team 2,
+        // 2026-09-21). Merged with mapping.ts's former_member_emails, which
+        // still covers JSON-roster teams that have no live Scoro group to
+        // read this signal from. Their historical hours should count
+        // toward this team's utilization/billable forever, but they must
+        // never appear in the roster shown on the dashboard — so this is
+        // additive to the wide union / membership bypass below, never to
+        // teamLiveRoster.members itself.
+        const autoFormerMemberEmails = inactiveFormerMemberEmailsForTeam(
+          team.code,
+          usersDetailed,
+          groupIdsByName
+        );
+        const formerMemberEmails = [
+          ...new Set([...(team.formerMemberEmails ?? []), ...autoFormerMemberEmails]),
+        ];
+        const teamLive = { ...teamLiveRoster, formerMemberEmails };
+
+        const rosterEmails = new Set<string>(formerMemberEmails.map((e) => e.toLowerCase()));
         for (const q of QUARTERS) {
           for (const e of rosterEmailsForQuarter(
             team.code,
@@ -263,6 +298,18 @@ export async function runSync(directorId?: string): Promise<void> {
           }
         }
         const ids = userIdsFromEmails([...rosterEmails], users);
+        // Fixes the mover double-count the wide union above deliberately
+        // introduces (see buildTeamMembershipLookup) — gates
+        // aggregateTimeForTeam's per-day/per-entry classification by
+        // whether this person was actually on the team on that date.
+        // Former (departed-the-company) members bypass this gate inside
+        // aggregateTimeForTeam itself — see teamLive.formerMemberEmails
+        // there.
+        const membershipLookup = buildTeamMembershipLookup(
+          team.code,
+          teamLive.members.map((m) => m.email),
+          rosterHistory.slice(0, rosterIndex)
+        );
         if (ids.length > 0) {
           try {
             const teamProjects = teamFetches.find((f) => f.team.code === team.code)?.projects;
@@ -293,7 +340,8 @@ export async function runSync(directorId?: string): Promise<void> {
               previousStats && {
                 utilization: previousStats.kpiDebug?.utilization ?? {},
                 billable: previousStats.kpiDebug?.billable ?? {},
-              }
+              },
+              membershipLookup
             );
             entry.teamStats.push({ team: teamLive, stats });
             console.log(

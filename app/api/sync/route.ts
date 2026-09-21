@@ -18,6 +18,12 @@ export async function POST(req: NextRequest) {
 
   const { searchParams } = new URL(req.url);
   const director = searchParams.get("director") ?? undefined;
-  const result = triggerSync(director);
+  // ?force=true bypasses closed-quarter cache reuse for this run — every
+  // quarter is re-derived live, not just the currently-open one. Needed
+  // after a logic fix (e.g. widening a team's roster) that an already-closed
+  // quarter would otherwise never pick up, since it just replays its last
+  // cached value forever.
+  const forceFullRecompute = searchParams.get("force") === "true";
+  const result = triggerSync(director, forceFullRecompute);
   return NextResponse.json(result, { status: result.started ? 202 : 409 });
 }

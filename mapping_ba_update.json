@@ -356,6 +356,13 @@
       "weekly_target": 32.0
     },
     {
+      "name": "Iryna Khalalovich",
+      "email": "iryna.khalalovich@admindagency.com",
+      "team": "ACC",
+      "leader_email": "kamil.lach@admindagency.com",
+      "weekly_target": 40.0
+    },
+    {
       "name": "Gabriela Baka",
       "email": "gabriela.baka@admindagency.com",
       "team": "UX",
@@ -496,9 +503,10 @@
     {
       "name": "Julia Ożgo",
       "email": "julia.piwowarska@admindagency.com",
-      "team": "PRINC",
-      "leader_email": "aida.fernandez@admindagency.com",
-      "weekly_target": 40.0
+      "team": "4",
+      "leader_email": "marta.szmyd@admindagency.com",
+      "weekly_target": 40.0,
+      "is_team_lead": true
     },
     {
       "name": "Justyna Brząkała",
@@ -721,8 +729,8 @@
     {
       "name": "Małgorzata Piwowarczyk",
       "email": "malgorzata.piwowarczyk@admindagency.com",
-      "team": "1",
-      "leader_email": "maciej.ochecki@admindagency.com",
+      "team": "2",
+      "leader_email": "andrzej.leraczyk@admindagency.com",
       "weekly_target": 40.0
     },
     {

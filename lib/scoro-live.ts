@@ -8,7 +8,6 @@ import { scoroListAllPages, scoroListAllPagesUser, scoroPostUser, resolveScoroUs
 import type { MockEscalation } from "./mock";
 import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, TeamStats } from "./mock";
 import { readMeta, writeMeta } from "./snapshot-cache";
-import { weeklyTargetForEmail } from "./scoro-roster";
 import type { TeamRosterSnapshot } from "./snapshot-types";
 import {
   activityIdFromEntry,
@@ -728,14 +727,23 @@ export async function aggregateTimeForTeam(
   // roster's hours + a departed person's hours". Confirmed live
   // 2026-09-21: Team 4's Q2 came out to 100.6% (clamped to 100%) because
   // Dominik Wycisło's real historical hours were added to the numerator
-  // with no matching capacity added to the denominator. No per-weekday
-  // Scoro availability is available for a departed member here, so this
-  // uses their flat weekly_target (mapping.ts) as an approximation, same
-  // fallback scheduledSecondsForDay already uses for anyone without one.
+  // with no matching capacity added to the denominator.
+  //
+  // Deliberately NOT sourced from either Scoro's live availability or
+  // mapping.ts's weekly_target: a departed member's live Scoro schedule
+  // reflects their CURRENT (often manually zeroed-out) status, not their
+  // historical one while active (confirmed live: Dominik's is all zeros,
+  // correctly set that way by the user going forward) — and per the user
+  // 2026-09-21, weekly_target itself is an unreliable source in general
+  // (a one-time snapshot that can bake in that week's time-off and get
+  // treated as a permanent figure). Default assumption for any leaver is
+  // full-time (8h/day, 40h/week) unless told otherwise for that specific
+  // person — there is no current exception.
+  const LEAVER_DEFAULT_WEEKLY_TARGET_HOURS = 40;
   const formerMemberRecords: ResolvedTeam["members"] = [...formerMemberEmails].map((email) => ({
     name: email,
     email,
-    weeklyTarget: weeklyTargetForEmail(email),
+    weeklyTarget: LEAVER_DEFAULT_WEEKLY_TARGET_HOURS,
   }));
 
   const activities = await loadActivityLookup();
@@ -767,6 +775,32 @@ export async function aggregateTimeForTeam(
   // open quarter for the fetch-window narrowing below to be correct.
   const open = QUARTERS.filter((q) => !closed.has(q));
 
+  // Fetch entries early (moved ahead of the availability loop below) so a
+  // former member's real quarter-level presence can gate their capacity
+  // contribution, not just their numerator hours. Without this, a leaver
+  // who departed BEFORE a given open quarter even started (e.g. left in
+  // March, quarter is Q2/Apr-Jun) would still get a full quarter's worth
+  // of phantom capacity added to the denominator despite having zero real
+  // activity that quarter — confirmed live 2026-09-21: Team 1's Marcelina
+  // Żurek left in March, had zero Q2 hours, but her default 40h/week was
+  // being added to Q2's target regardless, deflating utilization.
+  const fetchFrom = open.length > 0 ? quarterRange(year, open[0]).from : yr.to;
+  const entries = await fetchTimeEntriesForUsers(userIds, fetchFrom, yr.to);
+  const userIdToEmail = new Map(users.map((u) => [u.id, u.email]));
+  const formerMemberActiveQuarters = new Map<string, Set<Quarter>>();
+  for (const e of entries) {
+    const email = userIdToEmail.get(Number(e.user_id))?.toLowerCase();
+    if (!email || !formerMemberEmails.has(email)) continue;
+    const dateStr =
+      (typeof e.time_entry_date === "string" && e.time_entry_date) ||
+      (typeof e.start_datetime === "string" && String(e.start_datetime).slice(0, 10)) ||
+      "";
+    const q = quarterFromIsoDate(dateStr, year);
+    if (!q) continue;
+    if (!formerMemberActiveQuarters.has(email)) formerMemberActiveQuarters.set(email, new Set());
+    formerMemberActiveQuarters.get(email)!.add(q);
+  }
+
   // Day-by-day (not weeks × flat weekly target) so a part-timer's non-work
   // weekdays correctly contribute 0, matching their real Scoro schedule.
   // Only for open quarters — closed quarters already have their targetSec.
@@ -776,6 +810,7 @@ export async function aggregateTimeForTeam(
   for (const m of [...team.members, ...formerMemberRecords]) {
     const isFormerMember = formerMemberEmails.has(m.email.toLowerCase());
     for (const q of open) {
+      if (isFormerMember && !formerMemberActiveQuarters.get(m.email.toLowerCase())?.has(q)) continue;
       const { from, to } = quarterRange(year, q);
       if (asOfIso < from) continue;
       const end = asOfIso < to ? asOfIso : to;
@@ -840,15 +875,18 @@ export async function aggregateTimeForTeam(
     // at asOfIso), so subtracting their absence here would understate target
     // hours for time that hasn't happened yet.
     if (a.date > asOfIso) continue;
+    const memberIsFormer = formerMemberEmails.has(member.email.toLowerCase());
+    // Same quarter-presence gating as the availability loop above — no
+    // phantom absence-driven target adjustment for a quarter a former
+    // member had zero real activity in.
+    if (memberIsFormer && !formerMemberActiveQuarters.get(member.email.toLowerCase())?.has(q)) {
+      continue;
+    }
     // Same join-date gating as the availability loop above: a pre-join
     // absence (booked while the member was still on their old team)
     // mustn't subtract from a target that no longer counts those days.
     // Former members bypass this the same way they bypass it there.
-    if (
-      membershipLookup &&
-      !formerMemberEmails.has(member.email.toLowerCase()) &&
-      !membershipLookup(member.email, a.date)
-    ) {
+    if (membershipLookup && !memberIsFormer && !membershipLookup(member.email, a.date)) {
       continue;
     }
     const scheduled = scheduledSecondsForDay(member, a.date);
@@ -859,13 +897,8 @@ export async function aggregateTimeForTeam(
     agg[q].targetSec = Math.max(0, agg[q].availSec - agg[q].absenceSec);
   }
 
-  // Fetch the whole team's entries in one call (see fetchTimeEntriesForUsers)
-  // and collect exactly which calendar/task event_ids need resolving — no
-  // full-year bulk crawl, no double-fetch. Narrowed to the earliest open
-  // quarter's start (not the full year) since closed quarters' entries are
-  // already accounted for above.
-  const fetchFrom = open.length > 0 ? quarterRange(year, open[0]).from : yr.to;
-  const entries = await fetchTimeEntriesForUsers(userIds, fetchFrom, yr.to);
+  // Entries were already fetched above (see formerMemberActiveQuarters) —
+  // collect exactly which calendar/task event_ids need resolving from them.
   const calEventIds = new Set<number>();
   const taskEventIds = new Set<number>();
   collectReferencedEventIds(entries, calEventIds, taskEventIds);
@@ -876,7 +909,6 @@ export async function aggregateTimeForTeam(
     projectsForUtilization
   );
 
-  const userIdToEmail = new Map(users.map((u) => [u.id, u.email]));
   const unresolvedSecByQuarter = new Map<Quarter, number>();
   for (const e of entries) {
     const dateStr =

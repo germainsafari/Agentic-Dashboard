@@ -99,10 +99,6 @@
       "leader_email": "aida.fernandez@admindagency.com",
       "upper_leader_email": "dominika.konieczkowska@admindagency.com"
     },
-    "PM-PPT": {
-      "leader_email": "maciej.furtak@admindagency.com",
-      "upper_leader_email": "aleksandra.golab@admindagency.com"
-    },
     "STR": {
       "leader_email": "karolina.pospischil@admind.pl",
       "upper_leader_email": "aleksandra.golab@admindagency.com"
@@ -344,7 +340,7 @@
     {
       "name": "Eryka Żmuda",
       "email": "eryka.zmuda@admindagency.com",
-      "team": "PM-PPT",
+      "team": "PPT",
       "leader_email": "maciej.furtak@admindagency.com",
       "weekly_target": 40.0
     },
@@ -711,13 +707,6 @@
       "leader_email": "michal.majewski@admindagency.com",
       "weekly_target": 40.0,
       "is_team_lead": true
-    },
-    {
-      "name": "Maja Sikora",
-      "email": "maja.sikora@admindagency.com",
-      "team": "PM-PPT",
-      "leader_email": "maciej.furtak@admindagency.com",
-      "weekly_target": 40.0
     },
     {
       "name": "Malwina Tuchendler",

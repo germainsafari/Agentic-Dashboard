@@ -152,7 +152,6 @@ function prettyTeamName(code: TeamCode): string {
     "PM-BM": "PM · Brand Mgmt",
     "PM-DP": "Digital Platform · PM",
     "PM-OTHER": "PM · Cross-client",
-    "PM-PPT": "PM · Presentations",
     CAMPAIGNS: "Campaigns",
     COPYWRITER: "Copywriting",
     ACC: "Accelleron",

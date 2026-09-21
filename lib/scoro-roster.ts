@@ -63,7 +63,6 @@ const JSON_ROSTER_TEAMS = new Set<TeamCode>([
   "PM-2",
   "PM-4",
   "PM-OTHER",
-  "PM-PPT",
   "PM-BM",
   "PM-DP",
   // Scoro has only one combined "Team #Motion" group (id 23) — no separate

@@ -67,4 +67,29 @@ describe("weeklyAvailabilityForDate", () => {
     });
     expect(weeklyAvailabilityForDate("Alice@X.com", "2026-09-10", history)).toEqual(fullTime);
   });
+
+  it("applies the known-historical Hristina fact even with no sync-recorded history yet", () => {
+    // Confirmed live 2026-09-22: without this seed, Team 2's Q2 utilization
+    // read 86%/78% billable because her *current* 4h/day got applied flat
+    // across the whole year. With it, Q1–Q3 correctly split at 2026-09-01.
+    const HRISTINA = "hristina.gjorgijevska@admindagency.com";
+    expect(weeklyAvailabilityForDate(HRISTINA, "2026-04-15", [])).toEqual({
+      monday: 8 * 3600,
+      tuesday: 8 * 3600,
+      wednesday: 8 * 3600,
+      thursday: 8 * 3600,
+      friday: 8 * 3600,
+      saturday: 0,
+      sunday: 0,
+    });
+    expect(weeklyAvailabilityForDate(HRISTINA, "2026-09-15", [])).toEqual({
+      monday: 4 * 3600,
+      tuesday: 4 * 3600,
+      wednesday: 4 * 3600,
+      thursday: 4 * 3600,
+      friday: 4 * 3600,
+      saturday: 0,
+      sunday: 0,
+    });
+  });
 });

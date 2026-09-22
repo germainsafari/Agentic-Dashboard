@@ -29,6 +29,7 @@ import {
   rosterEmailsForQuarter,
   userIdsFromEmails,
 } from "./roster-history";
+import { appendAvailabilitySnapshot } from "./availability-history";
 import { mockTeamStats, mockEscalations } from "./mock";
 import {
   getCachedDirector,
@@ -218,6 +219,26 @@ export async function runSync(
     );
     const rosterIndex = rosterHistory.length - 1;
 
+    // Snapshot every user's live Scoro weekly schedule this sync — see
+    // availability-history.ts. Lets target-hour math use the schedule that
+    // was actually in effect on each day, so a mid-quarter Scoro schedule
+    // change self-corrects on the next sync instead of needing someone to
+    // notice and manually recompute past months.
+    const availabilityByEmail: Record<string, (typeof usersDetailed)[number]["availability"]> = {};
+    for (const u of usersDetailed) {
+      if (u.availability) availabilityByEmail[u.email.toLowerCase()] = u.availability;
+    }
+    const availabilityHistory = appendAvailabilitySnapshot(
+      currentMeta.availabilityHistory ?? [],
+      new Date().toISOString(),
+      availabilityByEmail as Record<string, NonNullable<(typeof usersDetailed)[number]["availability"]>>
+    );
+    // Excludes the snapshot just appended above (same reasoning as
+    // rosterHistory.slice(0, rosterIndex)): "today" is already covered by
+    // each member's live m.availability fallback, so only prior snapshots
+    // are needed to resolve past days correctly.
+    const availabilityHistoryForLookup = availabilityHistory.slice(0, availabilityHistory.length - 1);
+
     const directors = allResolvedDirectors().filter(
       (d) => !directorId || d.id === directorId
     );
@@ -341,7 +362,8 @@ export async function runSync(
                 utilization: previousStats.kpiDebug?.utilization ?? {},
                 billable: previousStats.kpiDebug?.billable ?? {},
               },
-              membershipLookup
+              membershipLookup,
+              availabilityHistoryForLookup
             );
             entry.teamStats.push({ team: teamLive, stats });
             console.log(
@@ -385,6 +407,7 @@ export async function runSync(
       lastSyncDurationMs: Date.now() - startMs,
       syncError: null,
       rosterHistory,
+      availabilityHistory,
     });
 
     if (!isPersistentCacheEnabled()) {

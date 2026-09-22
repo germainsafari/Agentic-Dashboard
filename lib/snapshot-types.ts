@@ -1,10 +1,16 @@
-import type { ResolvedTeam } from "./directors";
+import type { ResolvedTeam, WeekAvailability } from "./directors";
 import type { MockEscalation, TeamStats } from "./mock";
 
 /** One sync's team rosters (emails per team code). */
 export type TeamRosterSnapshot = {
   syncedAt: string;
   byTeam: Record<string, string[]>;
+};
+
+/** One sync's per-user live Scoro weekly schedule (lowercased email keys). */
+export type AvailabilitySnapshot = {
+  syncedAt: string;
+  byEmail: Record<string, WeekAvailability>;
 };
 
 export type DirectorCacheEntry = {
@@ -22,4 +28,8 @@ export type SyncMeta = {
   offerPrepBookmarkId?: number | null;
   /** Per-sync team membership snapshots for historical headcount / utilization. */
   rosterHistory?: TeamRosterSnapshot[];
+  /** Per-sync live Scoro weekly-schedule snapshots — lets target-hour math use
+   * the schedule that was actually in effect on each day instead of applying
+   * today's live value to the whole quarter. See availability-history.ts. */
+  availabilityHistory?: AvailabilitySnapshot[];
 };

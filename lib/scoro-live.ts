@@ -8,7 +8,8 @@ import { scoroListAllPages, scoroListAllPagesUser, scoroPostUser, resolveScoroUs
 import type { MockEscalation } from "./mock";
 import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, TeamStats } from "./mock";
 import { readMeta, writeMeta } from "./snapshot-cache";
-import type { TeamRosterSnapshot } from "./snapshot-types";
+import type { TeamRosterSnapshot, AvailabilitySnapshot } from "./snapshot-types";
+import { weeklyAvailabilityForDate } from "./availability-history";
 import {
   activityIdFromEntry,
   isInternalNonBillableActivityId,
@@ -504,17 +505,25 @@ const WEEKDAY_KEYS: (keyof WeekAvailability)[] = [
 ];
 
 /**
- * Seconds this member was actually scheduled to work on a given date. Uses
- * Scoro's live per-weekday availability when present (correctly returns 0 for
- * e.g. a part-timer's non-work weekday); falls back to a flat weekly-target ÷
- * 5 on weekdays only (never weekends) when no live availability record exists
- * — the static-JSON roster path has no per-weekday data to do better with.
+ * Seconds this member was actually scheduled to work on a given date. Prefers
+ * the schedule recorded in availabilityHistory as of that specific date (see
+ * availability-history.ts) — this is what lets a mid-quarter Scoro schedule
+ * change self-correct on the next sync instead of requiring someone to
+ * notice and retroactively recompute. Falls back to Scoro's current live
+ * per-weekday availability when no historical snapshot covers this date yet
+ * (e.g. before this feature started recording snapshots), and finally to a
+ * flat weekly-target ÷ 5 on weekdays only (never weekends) when no live
+ * availability record exists at all — the static-JSON roster path has no
+ * per-weekday data to do better with.
  */
 function scheduledSecondsForDay(
-  m: { weeklyTarget: number; availability?: WeekAvailability },
-  isoDate: string
+  m: { email: string; weeklyTarget: number; availability?: WeekAvailability },
+  isoDate: string,
+  availabilityHistory: AvailabilitySnapshot[] = []
 ): number {
   const key = WEEKDAY_KEYS[new Date(`${isoDate}T00:00:00Z`).getUTCDay()];
+  const historical = weeklyAvailabilityForDate(m.email, isoDate, availabilityHistory);
+  if (historical) return historical[key] ?? 0;
   if (m.availability) return m.availability[key] ?? 0;
   if (key === "saturday" || key === "sunday") return 0;
   return (Math.max(0, m.weeklyTarget) * 3600) / 5;
@@ -703,7 +712,10 @@ export async function aggregateTimeForTeam(
   /** Optional — see buildTeamMembershipLookup. Omitted by the two row-level
    * debug/reconciliation exports below, which intentionally show every
    * requested user's full-quarter data unfiltered. */
-  membershipLookup?: (email: string, dateIso: string) => boolean
+  membershipLookup?: (email: string, dateIso: string) => boolean,
+  /** Optional — see availability-history.ts. Per-day schedule lookup used
+   * instead of applying today's live availability to the whole quarter. */
+  availabilityHistory: AvailabilitySnapshot[] = []
 ): Promise<QuarterAgg> {
   logAvailabilityMismatches(team);
 
@@ -829,7 +841,7 @@ export async function aggregateTimeForTeam(
       ) {
         const dateStr = d.toISOString().slice(0, 10);
         if (membershipLookup && !isFormerMember && !membershipLookup(m.email, dateStr)) continue;
-        agg[q].availSec += scheduledSecondsForDay(m, dateStr);
+        agg[q].availSec += scheduledSecondsForDay(m, dateStr, availabilityHistory);
       }
     }
   }
@@ -897,7 +909,7 @@ export async function aggregateTimeForTeam(
     if (membershipLookup && !memberIsFormer && !membershipLookup(member.email, a.date)) {
       continue;
     }
-    const scheduled = scheduledSecondsForDay(member, a.date);
+    const scheduled = scheduledSecondsForDay(member, a.date, availabilityHistory);
     const claimed = a.value === -1 ? scheduled : Math.max(0, a.value);
     agg[q].absenceSec += Math.min(claimed, scheduled);
   }
@@ -2759,7 +2771,9 @@ export async function loadTeamBundleFromScoro(
   previousDebug?: PreviousUtilBillableDebug,
   /** Optional — see buildTeamMembershipLookup. Forwarded to
    * aggregateTimeForTeam to fix the mover double-count. */
-  membershipLookup?: (email: string, dateIso: string) => boolean
+  membershipLookup?: (email: string, dateIso: string) => boolean,
+  /** Optional — see availability-history.ts. Forwarded to aggregateTimeForTeam. */
+  availabilityHistory: AvailabilitySnapshot[] = []
 ): Promise<TeamStats> {
   if (userIds.length === 0) {
     throw new Error("no_scoro_users");
@@ -2781,7 +2795,8 @@ export async function loadTeamBundleFromScoro(
     users,
     projectsForUtilization ?? projects,
     previousDebug,
-    membershipLookup
+    membershipLookup,
+    availabilityHistory
   );
   const projKpi = await computeProjectKpisByQuarter(projects, year);
 

@@ -4,7 +4,7 @@ import { KPI_META, QUARTERS, PERIODS, type Quarter } from "./brand";
 import type { ResolvedTeam, WeekAvailability } from "./directors";
 import { DIRECTOR_SEEDS, type DirectorSeed } from "./directors";
 import { MAPPING, teamsForDirector } from "./mapping";
-import { scoroListAllPages, scoroListAllPagesUser, scoroPostUser, resolveScoroUserToken } from "./scoro-api";
+import { scoroListAllPages, scoroListAllPagesUser, scoroPost, scoroPostUser, resolveScoroUserToken } from "./scoro-api";
 import type { MockEscalation } from "./mock";
 import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, TeamStats } from "./mock";
 import { readMeta, writeMeta } from "./snapshot-cache";
@@ -212,15 +212,91 @@ function normalizeBudgetCode(raw: string): string {
 const EVENT_ID_BATCH_SIZE = 100;
 
 /**
- * Fetches calendar/list or tasks/list rows for exactly the referenced event_ids
- * (both endpoints accept a batched `event_id` array filter) instead of crawling
- * a full year of data per user — far fewer requests, and no pagination-cap
- * truncation for high-volume users.
+ * tasks/list with detailed_response:true returns every assignee for shared/
+ * recurring company-wide tasks (e.g. "Admind Scrum" carries 100+ assignees).
+ * Two separate problems this guards against, both confirmed live 2026-09-24
+ * as the actual cause of Team 1's Q1 utilization reading hundreds of hours
+ * low (every task in an affected batch, including ordinary small client
+ * tasks that just happened to share it with a problem one, silently became
+ * "unresolvedProject"):
+ *
+ * 1. Scoro silently caps per_page on detailed_response requests well below
+ *    a 100-id batch's size — requesting a single page sized to the whole
+ *    batch does NOT error, it just quietly returns fewer rows than
+ *    requested with no signal anything was dropped. So this still pages
+ *    properly (DETAILED_TASK_PER_PAGE, the value the old pre-adaptive code
+ *    used successfully) rather than assuming one page covers everything.
+ * 2. A batch's combined *detailed* payload can still be large enough to
+ *    blow the 45s request timeout mid-page, which surfaces as scoroPost
+ *    silently returning null after exhausting its own retries (logged as
+ *    "failed after N attempts"), not as a thrown error. Rather than a flat
+ *    smaller EVENT_ID_BATCH_SIZE (which would tax every sync even when
+ *    nothing in a batch is actually oversized), a batch is tried at full
+ *    size first, and only a batch whose page request genuinely failed gets
+ *    split in half and retried from page 1, recursing until each piece
+ *    succeeds (or is a single event_id that still fails, which is logged
+ *    and skipped rather than retried forever).
+ */
+const DETAILED_TASK_PER_PAGE = 25;
+const DETAILED_TASK_MAX_PAGES = 40;
+
+async function fetchDetailedTaskBatch(eventIds: number[]): Promise<ScoroTask[]> {
+  if (eventIds.length === 0) return [];
+  const out: ScoroTask[] = [];
+  for (let page = 1; page <= DETAILED_TASK_MAX_PAGES; page++) {
+    const res = await scoroPost<ScoroTask[]>("tasks/list", {
+      filter: { event_id: eventIds },
+      per_page: DETAILED_TASK_PER_PAGE,
+      page,
+      request: {},
+      detailed_response: true,
+    });
+    if (res == null) {
+      // This specific page request failed outright — discard whatever
+      // partial pages this recursion level already collected (to avoid
+      // double-counting once the split below re-fetches from page 1) and
+      // split eventIds in half instead of continuing to page through the
+      // original full-size id set.
+      if (eventIds.length === 1) {
+        console.warn(
+          `[scoro] tasks/list: giving up on event_id ${eventIds[0]} after repeated failures — this task's hours will be excluded from utilization`
+        );
+        return [];
+      }
+      const mid = Math.ceil(eventIds.length / 2);
+      const [a, b] = await Promise.all([
+        fetchDetailedTaskBatch(eventIds.slice(0, mid)),
+        fetchDetailedTaskBatch(eventIds.slice(mid)),
+      ]);
+      return [...a, ...b];
+    }
+    const rows = Array.isArray(res.data) ? res.data : [];
+    out.push(...rows);
+    if (rows.length < DETAILED_TASK_PER_PAGE) break;
+  }
+  return out;
+}
+
+async function fetchDetailedTasksByEventIds(eventIds: number[]): Promise<ScoroTask[]> {
+  if (eventIds.length === 0) return [];
+  const out: ScoroTask[] = [];
+  for (let i = 0; i < eventIds.length; i += EVENT_ID_BATCH_SIZE) {
+    const chunk = eventIds.slice(i, i + EVENT_ID_BATCH_SIZE);
+    out.push(...(await fetchDetailedTaskBatch(chunk)));
+  }
+  return out;
+}
+
+/**
+ * Fetches calendar/list rows for exactly the referenced event_ids (the
+ * endpoint accepts a batched `event_id` array filter) instead of crawling a
+ * full year of data per user — far fewer requests, and no pagination-cap
+ * truncation for high-volume users. Calendar rows are small (no assignee
+ * blowup like tasks/list detailed_response), so a flat batch size is fine.
  */
 async function fetchByEventIds<T extends Record<string, unknown>>(
-  path: "calendar/list" | "tasks/list",
-  eventIds: number[],
-  detailed = false
+  path: "calendar/list",
+  eventIds: number[]
 ): Promise<T[]> {
   if (eventIds.length === 0) return [];
   const out: T[] = [];
@@ -228,8 +304,7 @@ async function fetchByEventIds<T extends Record<string, unknown>>(
     const chunk = eventIds.slice(i, i + EVENT_ID_BATCH_SIZE);
     const rows = await scoroListAllPages<T>(path, {
       filter: { event_id: chunk },
-      detailed,
-      maxPages: detailed ? 20 : 5,
+      maxPages: 5,
     });
     out.push(...rows);
   }
@@ -243,8 +318,7 @@ async function buildEntryProjectResolver(
 ): Promise<EntryProjectResolver> {
   const [calendarRows, taskRows] = await Promise.all([
     fetchByEventIds<Record<string, unknown>>("calendar/list", calEventIds),
-    // detailed_response is required for tasks/list to include custom_fields (c_budgettype).
-    fetchByEventIds<ScoroTask>("tasks/list", taskEventIds, true),
+    fetchDetailedTasksByEventIds(taskEventIds),
   ]);
 
   const calendarProjectById = new Map<number, number>();

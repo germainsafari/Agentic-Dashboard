@@ -28,7 +28,8 @@
     },
     "ACC": {
       "leader_email": "kamil.lach@admindagency.com",
-      "upper_leader_email": "michal.majewski@admindagency.com"
+      "upper_leader_email": "michal.majewski@admindagency.com",
+      "former_member_emails": ["michal.majewski@admindagency.com"]
     },
     "BA": {
       "leader_email": "marek.golebiowski@admindagency.com",

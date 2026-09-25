@@ -10,6 +10,7 @@ import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, Te
 import { readMeta, writeMeta } from "./snapshot-cache";
 import type { TeamRosterSnapshot, AvailabilitySnapshot } from "./snapshot-types";
 import { weeklyAvailabilityForDate } from "./availability-history";
+import { Q1_2026_HARDCODED_KPIS } from "./q1-2026-hardcoded-kpis";
 import {
   activityIdFromEntry,
   isInternalNonBillableActivityId,
@@ -732,6 +733,53 @@ export type PreviousUtilBillableDebug = {
 };
 
 /**
+ * Manually-confirmed real average weekly target hours for departed members,
+ * replacing the blanket LEAVER_DEFAULT_WEEKLY_TARGET_HOURS=40 assumption
+ * (aggregateTimeForTeam below) for anyone this was derived for. A departed
+ * member's live Scoro schedule is typically zeroed out post-departure, so
+ * there's no live signal to read their real rate from — the flat 40h/week
+ * full-time guess was the best available fallback until now, but confirmed
+ * live 2026-09-25: EVERY one of 16 departed members checked against Traffic
+ * Management's monthly rosters (Jan-Aug 2026) had a real average rate BELOW
+ * 40h/week (12.7-38.2h/week) — final months before departure routinely
+ * include partial onboarding/offboarding, reduced hours, or time off, so
+ * the flat assumption was systematically overcrediting capacity for every
+ * leaver, not just one. Team FE's Q1 utilization alone was inflated by 64h
+ * of phantom Szymon Skrzypczak capacity from this.
+ *
+ * Each value is `5 * (sum of real monthly target hours from the
+ * spreadsheets) / (sum of real weekdays in those same months)` — a single
+ * average rather than a month-by-month reconstruction, since the flat
+ * Mon-Fri model that scheduledSecondsForDay's fallback already uses for
+ * everyone without live availability can only take one number anyway.
+ * Months tagged with an ambiguous team label (spreadsheet "PM"/"PM -
+ * Delivery" don't say which of the app's PM-1/PM-2/PM-4/PM-OTHER/PM-BM/
+ * PM-DP subteams) or an untracked one ("GROW") are excluded from the
+ * average rather than guessed. Anyone not listed here keeps using the flat
+ * 40h/week default — this is deliberately narrow, not a general historical
+ * import (see availability-history.ts's KNOWN_HISTORICAL_SNAPSHOTS for the
+ * same reasoning).
+ */
+const KNOWN_LEAVER_WEEKLY_TARGETS: Record<string, number> = {
+  "hanna.pitala@admindagency.com": 36.44, // Hanna Pitala, 2 months of real spreadsheet data
+  "michal.niedopytalski@admindagency.com": 30.91, // Michał Niedopytalski, 1 month
+  "igor.kurylak@admindagency.com": 12.73, // Igor Kurylak, 1 month
+  "viktoria.mandych@admindagency.com": 21.82, // Viktoriia Mandych, 1 month
+  "marcelina.zurek@admindagency.com": 31.88, // Marcelina Żurek, 3 months
+  "magdalena.kotlarek@admindagency.com": 24.19, // Magdalena Kotlarek, 4 months
+  "anna.skiba@admindagency.com": 25.5, // Anna Skiba, 6 months
+  "dominik.wycislo@admindagency.com": 35.48, // Dominik Wycisło, 7 months
+  "piotr.gromniak@admindagency.com": 35, // Piotr Gromniak, 7 months
+  "andrzej.firlet@admindagency.com": 37.24, // Andrzej Firlet, 7 months
+  "malwina.tuchendler@admindagency.com": 36.84, // Malwina Tuchendler, 7 months
+  "szymon.skrzypczak@admindagency.com": 30.39, // Szymon Skrzypczak, 6 months
+  "karolina.dubaj@admindagency.com": 34.67, // Karolina Dubaj, 6 months
+  "emilia.michailidou-gunia@admindagency.com": 35, // Emilia Michailidou-Gunia, 3 months
+  "gabriela.baka@admindagency.com": 31.78, // Gabriela Baka, 5 months
+  "michal.wojtunik@admindagency.com": 38.18, // Michał Wojtunik, 5 months
+};
+
+/**
  * Manually-confirmed team transfers that predate this feature's roster-
  * history tracking — the same narrow, explicit-data-entry escape hatch as
  * availability-history.ts's KNOWN_HISTORICAL_SNAPSHOTS, for the same
@@ -919,13 +967,13 @@ export async function aggregateTimeForTeam(
   // 2026-09-21, weekly_target itself is an unreliable source in general
   // (a one-time snapshot that can bake in that week's time-off and get
   // treated as a permanent figure). Default assumption for any leaver is
-  // full-time (8h/day, 40h/week) unless told otherwise for that specific
-  // person — there is no current exception.
+  // full-time (8h/day, 40h/week) unless KNOWN_LEAVER_WEEKLY_TARGETS below
+  // has their real rate.
   const LEAVER_DEFAULT_WEEKLY_TARGET_HOURS = 40;
   const formerMemberRecords: ResolvedTeam["members"] = [...formerMemberEmails].map((email) => ({
     name: email,
     email,
-    weeklyTarget: LEAVER_DEFAULT_WEEKLY_TARGET_HOURS,
+    weeklyTarget: KNOWN_LEAVER_WEEKLY_TARGETS[email] ?? LEAVER_DEFAULT_WEEKLY_TARGET_HOURS,
   }));
 
   const activities = await loadActivityLookup();
@@ -937,7 +985,26 @@ export async function aggregateTimeForTeam(
   // keeps a routine re-sync from re-deriving months of unchanging history
   // every single run.
   const closed = new Set<Quarter>();
+
+  // Q1 2026 is hardcoded from the Traffic Management spreadsheets, not
+  // computed live — see q1-2026-hardcoded-kpis.ts for why (no public-holiday
+  // calendar, and Scoro absence tracking only started partway through the
+  // year, making live reconstruction unfixably wrong for this one closed,
+  // never-to-be-retouched quarter). Checked before the previousDebug cache
+  // below so it always wins, even on a first-ever sync for this team.
+  if (year === 2026) {
+    const hardcoded = Q1_2026_HARDCODED_KPIS[team.code];
+    if (hardcoded) {
+      agg.Q1.utilizationSec = hardcoded.utilization.numerator;
+      agg.Q1.billableSec = hardcoded.billable.numerator;
+      agg.Q1.targetSec = hardcoded.utilization.denominator;
+      agg.Q1.availSec = hardcoded.utilization.denominator;
+      closed.add("Q1");
+    }
+  }
+
   for (const q of QUARTERS) {
+    if (closed.has(q)) continue;
     if (!isQuarterClosed(year, q)) continue;
     const prevUtil = previousDebug?.utilization[q];
     const prevBill = previousDebug?.billable[q];

@@ -92,4 +92,31 @@ describe("weeklyAvailabilityForDate", () => {
       sunday: 0,
     });
   });
+
+  it("resolves a departed member's real per-month rate instead of a smoothed average across their tenure (Szymon Skrzypczak: declining toward June departure)", () => {
+    // Real Scoro data: Apr logged/absence gross = 176h (full-time, capped at
+    // 8h/day) vs Jun logged 75h + 8h absence = 83h gross — he left mid-June,
+    // so his real gross availability that month was already well below a
+    // full 8h/day rate even before any absence. A single flat average
+    // across his whole tenure would undershoot April (his real rate was
+    // above his own average then) — confirmed live 2026-09-25 this made
+    // Team FE's utilization read high. Per-month entries avoid that.
+    //
+    // Jan-Mar entries were deliberately removed 2026-09-25: Q1 2026 is now
+    // hardcoded team-by-team from the spreadsheets (see
+    // q1-2026-hardcoded-kpis.ts) rather than computed from live Scoro data,
+    // so a Jan-Mar snapshot for a departed member on a hardcoded team (Team
+    // FE) is unreachable dead code — this test moved to Apr/Jun, both still
+    // live for Q2.
+    const SZYMON = "szymon.skrzypczak@admindagency.com";
+    const apr = weeklyAvailabilityForDate(SZYMON, "2026-04-15", []);
+    const jun = weeklyAvailabilityForDate(SZYMON, "2026-06-10", []);
+    expect(apr).toBeDefined();
+    expect(jun).toBeDefined();
+    // April (full-time, capped at 8h/day) is well above June's partial
+    // month — the whole point of going per-month.
+    expect(apr!.monday).toBeGreaterThan(jun!.monday);
+    expect(apr!.monday).toBeCloseTo(8 * 3600, 0);
+    expect(jun!.monday).toBeCloseTo((83 / 22) * 3600, 0);
+  });
 });

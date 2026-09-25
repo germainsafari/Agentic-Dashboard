@@ -147,7 +147,7 @@ export function userIdsForTeam(
  * per-user counts, 0 missing/extra either direction). maxPages raised vs
  * the old per-user 80 since one call now carries a whole team's volume.
  */
-async function fetchTimeEntriesForUsers(
+export async function fetchTimeEntriesForUsers(
   userIds: number[],
   from: string,
   to: string
@@ -463,11 +463,14 @@ function classifyUtilizationEntry(
 
 export type UtilizationEntryRow = {
   timeEntryId: number | null;
+  userId: number | null;
   eventId: number | null;
   eventType: string;
   title: string;
+  date: string;
   quarter: Quarter | null;
   durationHours: number;
+  billableHours: number;
   resolvedProjectId: number | null;
   projectBudgetTypeCode: string | null;
   taskBudgetTypeCode: string | null;
@@ -509,6 +512,7 @@ export async function debugUtilizationEntries(
       "";
     const q = quarterFromIsoDate(dateStr, year);
     const dur = parseDurationToSeconds(e.duration);
+    const bill = parseDurationToSeconds(e.billable_duration ?? "00:00:00");
     const result = classifyUtilizationEntry(e, resolver, activities, internalIds);
     const projectBudget = resolveEntryProjectBudget(e, resolver);
     const eventId = Number(e.event_id);
@@ -517,11 +521,14 @@ export async function debugUtilizationEntries(
 
     rows.push({
       timeEntryId: Number(e.time_entry_id) || null,
+      userId: Number(e.user_id) || null,
       eventId: Number.isFinite(eventId) && eventId > 0 ? eventId : null,
       eventType: String(e.event_type ?? ""),
       title: String(e.title ?? ""),
+      date: dateStr,
       quarter: q,
       durationHours: +(dur / 3600).toFixed(4),
+      billableHours: +(bill / 3600).toFixed(4),
       resolvedProjectId:
         e.event_type === "cal"
           ? (resolver.calendarProjectById.get(eventId) ?? null)
@@ -643,7 +650,7 @@ export type AbsenceDay = {
 let _orgTimeOffs: AbsenceDay[] | null = null;
 let _orgTimeOffsYear: number | null = null;
 let _orgTimeOffsComputedAt: number | null = null;
-// Same reasoning and TTL as ESCALATIONS_CACHE_TTL_MS below: this is one
+// Same reasoning and TTL as ESCALATIONS_CACHE_TTL_MS above: this is one
 // org-wide crawl whose result doesn't depend on which director's sync
 // triggered it, so it must survive across the 9 separate per-director cron
 // calls, not just across teams within a single director (which the
@@ -725,13 +732,106 @@ export type PreviousUtilBillableDebug = {
 };
 
 /**
+ * Manually-confirmed team transfers that predate this feature's roster-
+ * history tracking — the same narrow, explicit-data-entry escape hatch as
+ * availability-history.ts's KNOWN_HISTORICAL_SNAPSHOTS, for the same
+ * reason: buildTeamMembershipLookup's fallback ("no snapshot old enough ->
+ * assume current roster") is wrong for anyone who changed teams before
+ * tracking started, silently crediting their new team with hours/capacity
+ * from before they ever joined it. Confirmed live 2026-09-25 against
+ * Traffic Management's monthly rosters (Jan-Aug 2026) — e.g. Team FE's Q1
+ * utilization read 67% instead of the real ~82% because Maria Dorda (who
+ * joined FE in June, previously on UBS-SYN) was credited a full Q1's worth
+ * of FE capacity and hours despite not being on FE at all that quarter.
+ *
+ * Each entry is one (email, teamCode) period. `to` omitted means "through
+ * the present" (i.e. this is that person's current team, per the last
+ * confirmed month in the spreadsheet data). Only the exact people listed
+ * here are affected — everyone else resolves via the normal snapshot/
+ * current-roster logic below, unchanged.
+ */
+const KNOWN_TEAM_TRANSFERS: { email: string; teamCode: string; from: string; to?: string }[] = [
+  { email: "maria.dorda@admindagency.com", teamCode: "UBS-SYN", from: "2026-01-01", to: "2026-05-31" },
+  { email: "maria.dorda@admindagency.com", teamCode: "FE", from: "2026-06-01" },
+  { email: "hanna.pitala@admindagency.com", teamCode: "UBS-SYN", from: "2026-06-01" },
+  { email: "michal.lukasiewicz@admindagency.com", teamCode: "4", from: "2026-01-01", to: "2026-04-30" },
+  { email: "michal.lukasiewicz@admindagency.com", teamCode: "CAMPAIGNS", from: "2026-05-01" },
+  { email: "monika.pabian@admindagency.com", teamCode: "COE", from: "2026-01-01", to: "2026-07-31" },
+  { email: "monika.pabian@admindagency.com", teamCode: "PRINC", from: "2026-08-01" },
+  { email: "iryna.khalalovich@admindagency.com", teamCode: "2", from: "2026-01-01", to: "2026-07-31" },
+  { email: "iryna.khalalovich@admindagency.com", teamCode: "ACC", from: "2026-08-01" },
+  { email: "malgorzata.piwowarczyk@admindagency.com", teamCode: "1", from: "2026-01-01", to: "2026-07-31" },
+  { email: "malgorzata.piwowarczyk@admindagency.com", teamCode: "2", from: "2026-08-01" },
+  // Promoted from ACC to Creative Director (a non-KPI-tracked role) in May
+  // 2026 — deliberately no "to" team here: he still logs real time every
+  // month after the promotion (just not for ACC), so without this explicit
+  // cutoff his ACC former-member hours/capacity would keep accruing
+  // indefinitely (see isMemberDayCounted's doc comment).
+  { email: "michal.majewski@admindagency.com", teamCode: "ACC", from: "2026-01-01", to: "2026-04-30" },
+];
+
+/**
+ * Looks up KNOWN_TEAM_TRANSFERS for one (teamCode, email, dateIso) query.
+ * Returns null when this email has no known-transfer entries at all (the
+ * overwhelming majority of people) — callers fall through to the normal
+ * snapshot/current-roster logic unchanged in that case. When the email DOES
+ * have known history, an explicit true/false is always returned (never
+ * null) — including false for a queried team/date that isn't covered by any
+ * of their periods — so someone we know moved never falls back to "assume
+ * current roster" for a team they weren't really on.
+ */
+function knownTeamMembership(teamCode: string, email: string, dateIso: string): boolean | null {
+  const e = email.toLowerCase();
+  let hasKnownHistory = false;
+  for (const t of KNOWN_TEAM_TRANSFERS) {
+    if (t.email !== e) continue;
+    hasKnownHistory = true;
+    if (t.teamCode !== teamCode) continue;
+    if (dateIso < t.from) continue;
+    if (t.to && dateIso > t.to) continue;
+    return true;
+  }
+  return hasKnownHistory ? false : null;
+}
+
+/**
+ * Whether `email`'s time/capacity on `dateIso` should count toward
+ * `teamCode` — the single gate shared by the availability, absence, and
+ * classification loops in aggregateTimeForTeam. A KNOWN_TEAM_TRANSFERS
+ * entry always wins when present, even over the former-member bypass —
+ * Michał Majewski (ACC through April 2026, promoted to a non-KPI-tracked
+ * Creative Director role in May) is former-member-listed for ACC's sake,
+ * but keeps logging real time every month afterward (just not for ACC), so
+ * the generic "did this person have any activity this month" signal
+ * (memberActiveMonths) can't tell May+ apart from Jan-Apr the way a
+ * company-departure former member's zeroed-out activity naturally does.
+ * Otherwise: a plain former member bypasses membershipLookup entirely
+ * (their historical hours count for as long as memberActiveMonths says
+ * they were real); a current member is gated by membershipLookup as usual.
+ */
+function isMemberDayCounted(
+  teamCode: string,
+  email: string,
+  dateIso: string,
+  isFormerMember: boolean,
+  membershipLookup?: (email: string, dateIso: string) => boolean
+): boolean {
+  const known = knownTeamMembership(teamCode, email, dateIso);
+  if (known != null) return known;
+  if (isFormerMember) return true;
+  return !membershipLookup || membershipLookup(email, dateIso);
+}
+
+/**
  * Point-in-time roster membership: was `email` on `teamCode`'s roster as of
  * `dateIso`? Resolution is bounded by sync frequency (roster snapshots are
  * taken once per sync, ~every 3 days) — this finds the most recent snapshot
  * at or before dateIso and reads its membership; a date older than every
  * snapshot falls back to the CURRENT roster (best available signal for
  * entries predating all recorded history, e.g. right after this feature
- * first ships, or a team with no history yet).
+ * first ships, or a team with no history yet) — except for the handful of
+ * people in KNOWN_TEAM_TRANSFERS, who are resolved from that instead since
+ * the current-roster fallback is specifically wrong for them.
  *
  * Exists to fix a real double-count: sync.ts's roster union across quarters
  * (current ∪ anyone captured on this team's roster in a snapshot taken
@@ -745,12 +845,6 @@ export type PreviousUtilBillableDebug = {
  *
  * Builds the lookup once per team per sync (not per entry/day) — call once
  * and reuse the returned function.
- *
- * Verified live 2026-09-21 against a real transition (Maria Dorda,
- * UBS-SYN -> Formula E lead, 2026-07-01): without this gate, both teams'
- * naive wide-union fetch counted her full Q3 hours (801h combined, exactly
- * 2x her real 400.5h). With this gate applied, UBS-SYN correctly shows 0h
- * and Formula E correctly shows 400.5h for Q3 — summing to her real total.
  */
 export function buildTeamMembershipLookup(
   teamCode: string,
@@ -766,6 +860,8 @@ export function buildTeamMembershipLookup(
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 
   return (email: string, dateIso: string): boolean => {
+    const known = knownTeamMembership(teamCode, email, dateIso);
+    if (known != null) return known;
     const e = email.toLowerCase();
     let membership: boolean | null = null;
     for (const snap of sorted) {
@@ -882,6 +978,17 @@ export async function aggregateTimeForTeam(
   const entries = await fetchTimeEntriesForUsers(userIds, fetchFrom, yr.to);
   const userIdToEmail = new Map(users.map((u) => [u.id, u.email]));
   const memberActiveQuarters = new Map<string, Set<Quarter>>();
+  // Finer-grained twin of memberActiveQuarters, keyed by "YYYY-MM" — quarter
+  // granularity alone still overcredits someone who was only really active
+  // for part of an open quarter. Confirmed live 2026-09-25: Team 3D's
+  // Michał Niedopytalski (departed) has real time entries only in January,
+  // but memberActiveQuarters marked the whole of Q1 "active" for him purely
+  // because January falls in it, crediting him Feb+March capacity too —
+  // ~368h of phantom target hours, understating Team 3D's true Q1
+  // utilization by 11 points. Built from the same already-fetched entries,
+  // so — unlike the roster-history-driven membershipLookup gate — this
+  // needs no historical backfill to be accurate.
+  const memberActiveMonths = new Map<string, Set<string>>();
   for (const e of entries) {
     const email = userIdToEmail.get(Number(e.user_id))?.toLowerCase();
     if (!email) continue;
@@ -893,6 +1000,8 @@ export async function aggregateTimeForTeam(
     if (!q) continue;
     if (!memberActiveQuarters.has(email)) memberActiveQuarters.set(email, new Set());
     memberActiveQuarters.get(email)!.add(q);
+    if (!memberActiveMonths.has(email)) memberActiveMonths.set(email, new Set());
+    memberActiveMonths.get(email)!.add(dateStr.slice(0, 7));
   }
 
   // Day-by-day (not weeks × flat weekly target) so a part-timer's non-work
@@ -903,6 +1012,7 @@ export async function aggregateTimeForTeam(
   // counted toward this team's target hours — see buildTeamMembershipLookup.
   for (const m of [...team.members, ...formerMemberRecords]) {
     const isFormerMember = formerMemberEmails.has(m.email.toLowerCase());
+    const activeMonths = memberActiveMonths.get(m.email.toLowerCase());
     for (const q of open) {
       if (!memberActiveQuarters.get(m.email.toLowerCase())?.has(q)) continue;
       const { from, to } = quarterRange(year, q);
@@ -914,7 +1024,8 @@ export async function aggregateTimeForTeam(
         d.setUTCDate(d.getUTCDate() + 1)
       ) {
         const dateStr = d.toISOString().slice(0, 10);
-        if (membershipLookup && !isFormerMember && !membershipLookup(m.email, dateStr)) continue;
+        if (!activeMonths?.has(dateStr.slice(0, 7))) continue;
+        if (!isMemberDayCounted(team.code, m.email, dateStr, isFormerMember, membershipLookup)) continue;
         agg[q].availSec += scheduledSecondsForDay(m, dateStr, availabilityHistory);
       }
     }
@@ -970,17 +1081,20 @@ export async function aggregateTimeForTeam(
     // hours for time that hasn't happened yet.
     if (a.date > asOfIso) continue;
     const memberIsFormer = formerMemberEmails.has(member.email.toLowerCase());
-    // Same quarter-presence gating as the availability loop above — no
-    // phantom absence-driven target adjustment for a quarter this member
+    // Same quarter- and month-presence gating as the availability loop
+    // above — no phantom absence-driven target adjustment for a quarter
+    // (or, more precisely, a specific month within it) this member
     // (current or former) had zero real activity in.
     if (!memberActiveQuarters.get(member.email.toLowerCase())?.has(q)) {
+      continue;
+    }
+    if (!memberActiveMonths.get(member.email.toLowerCase())?.has(a.date.slice(0, 7))) {
       continue;
     }
     // Same join-date gating as the availability loop above: a pre-join
     // absence (booked while the member was still on their old team)
     // mustn't subtract from a target that no longer counts those days.
-    // Former members bypass this the same way they bypass it there.
-    if (membershipLookup && !memberIsFormer && !membershipLookup(member.email, a.date)) {
+    if (!isMemberDayCounted(team.code, member.email, a.date, memberIsFormer, membershipLookup)) {
       continue;
     }
     const scheduled = scheduledSecondsForDay(member, a.date, availabilityHistory);
@@ -1026,12 +1140,11 @@ export async function aggregateTimeForTeam(
     // and new team's numerator.
     if (membershipLookup) {
       const email = userIdToEmail.get(Number(e.user_id));
-      if (
-        email &&
-        !formerMemberEmails.has(email.toLowerCase()) &&
-        !membershipLookup(email, dateStr)
-      ) {
-        continue;
+      if (email) {
+        const isFormer = formerMemberEmails.has(email.toLowerCase());
+        if (!isMemberDayCounted(team.code, email, dateStr, isFormer, membershipLookup)) {
+          continue;
+        }
       }
     }
     const dur = parseDurationToSeconds(e.duration);
@@ -1474,7 +1587,20 @@ export function projectCompletionQuarter(p: ScoroProject, year: number): Quarter
   return quarterFromIsoDate(projectCompletionDateIso(p), year);
 }
 
-/** Quoted vs actual style totals from Scoro (preferred when present). */
+/**
+ * "Projects in Estimate" budget data — data/budgets.json, rebuilt via
+ * Scoro's v4 get_projects(includeBudget: true) (batchable, ~10 calls for the
+ * whole org) plus v2 invoices/list for usedBudget (batchable by
+ * project_id array, same pattern as elsewhere in this file). No live-fetch
+ * replacement exists on v2 alone: v2's projects/list and quotes/invoices
+ * only expose quoted-vs-invoiced amounts, which is a billing comparison, not
+ * a cost-vs-estimate one (an agency essentially never invoices a client more
+ * than quoted, so that comparison is structurally close to always-true —
+ * confirmed live 2026-09-09 against a real team: 25/25 projects passed).
+ * Rebuilt scope: completed/invoiced, Budget Type CE or OP only, due date
+ * (v4 dueDate / v2 deadline — neither API exposes a real completion-date
+ * field) in the current KPI year.
+ */
 type BudgetEntry = {
   estimatedCost: number;
   actualCost: number;
@@ -1779,6 +1905,55 @@ export async function computeProjectKpisByQuarter(
   return { fta, estimate, newBizWin, existingWin, analyzed, debug };
 }
 
+/**
+ * Row-level diagnostic for the Estimate KPI's per-quarter pool — mirrors
+ * computeProjectKpisByQuarter's own pool construction exactly (same filters)
+ * but returns per-project detail instead of just the aggregate percentage,
+ * for reconciling an unexpected 0%/100% reading.
+ */
+export function debugEstimatePool(
+  projects: ScoroProject[],
+  year: number,
+  quarter: Quarter
+): {
+  completedCount: number;
+  estPoolCount: number;
+  rows: {
+    projectId: number;
+    name: string;
+    status: string;
+    statusName: string;
+    hasEstimateData: boolean;
+    inEstimateSuccess: boolean;
+    cachedBudget: BudgetEntry | null;
+    projectBudgetPair: { cap: number; used: number } | null;
+  }[];
+} {
+  const completed = projects.filter(
+    (p) =>
+      projectCompletionQuarter(p, year) === quarter &&
+      isClientProject(p) &&
+      isCompletedOrInvoiced(p)
+  );
+  const estPool = completed.filter((p) => hasEstimateData(p));
+
+  const rows = completed.map((p) => {
+    const pid = projectNumericId(p);
+    return {
+      projectId: pid,
+      name: String(p.project_name ?? ""),
+      status: String(p.status ?? ""),
+      statusName: String((p as { status_name?: unknown }).status_name ?? ""),
+      hasEstimateData: hasEstimateData(p),
+      inEstimateSuccess: inEstimateSuccess(p),
+      cachedBudget: Number.isFinite(pid) ? (loadBudgetCache().get(pid) ?? null) : null,
+      projectBudgetPair: projectBudgetPair(p),
+    };
+  });
+
+  return { completedCount: completed.length, estPoolCount: estPool.length, rows };
+}
+
 function normalizedStatusCombined(p: ScoroProject): string {
   const a = `${p.status ?? ""}`.toLowerCase();
   const b = `${(p as { status_name?: string }).status_name ?? ""}`.toLowerCase();
@@ -1953,11 +2128,13 @@ let _offerPrepIds: Set<number> | null = null;
 let _pitchCandidateTasks: ScoroTask[] | null = null;
 let _pitchCandidateTasksYear: number | null = null;
 
-// doer_id and user_id confirmed live (2026-09-09) to be no-ops for Scoro's
-// tasks/list: both returned the identical full task set regardless of which
-// real user ID was passed, individually and via array-filter. owner_id and
-// assigned_to were confirmed correctly filtering (exact match between
-// per-ID-looped and array-filtered results).
+// doer_id and user_id deliberately excluded — confirmed live 2026-09-09 that
+// both are no-ops on tasks/list: every one of 5 different real user IDs
+// (tested individually and via array-filter) returned the exact same 4,793-
+// task set, identical to each other, regardless of which ID was passed.
+// owner_id and assigned_to were confirmed correctly filtering (228 and 324
+// unique tasks respectively, exact match between per-ID-looped and
+// array-filtered results, zero missing/extra either direction).
 const TASK_USER_FILTER_KEYS = ["owner_id", "assigned_to"] as const;
 /**
  * Task discovery for design leads (FTA/Estimate project pool + open-task
@@ -2194,14 +2371,16 @@ async function fetchOpenTasksForLead(leadId: number): Promise<ScoroTask[]> {
  * so nothing this year's FTA/estimate KPIs need is excluded.
  *
  * detailed: false (not true) — confirmed live that a busy design lead's
- * task count in this ~21-month window can run into the thousands, well
- * past detailed:true's page size of 25 (maxPages 40 × 25/page = 1,000
- * cap). Scoro returns tasks newest-first, so hitting that cap would
- * silently drop everything older than the 1,000th most recently modified
- * task. The non-detailed response still carries every field this function
- * reads (project_id, assigned_to, owner_id, related_users, event_id) —
- * just without the richer nested objects detailed mode adds — so this
- * switch is free: same maxPages now covers 4,000 tasks per lead.
+ * responsible_id/responsible_user_id task count in this ~21-month window
+ * regularly exceeds 1,500, well past the old detailed:true page size of 25
+ * (maxPages 40 × 25/page = 1,000 cap). Scoro returns tasks newest-first, so
+ * hitting that cap silently dropped everything older than the 1,000th most
+ * recently modified task — for a high-volume lead that could mean losing
+ * most of Q1/Q2 while Q3/Q4 (most recently touched) survived intact. The
+ * non-detailed response still carries every field this function reads
+ * (project_id, assigned_to, owner_id, related_users, event_id) — just
+ * without the richer nested objects detailed mode adds — so this switch is
+ * free: same maxPages now covers 4,000 tasks per (lead × filter key).
  */
 async function fetchAllTasksForLead(leadIds: number[], year: number): Promise<ScoroTask[]> {
   const seen = new Set<number>();

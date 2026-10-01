@@ -41,6 +41,14 @@ export const DIRECTOR_SEEDS: DirectorSeed[] = [
     initials: "MS",
   },
   {
+    id: "dio",
+    name: "Dio Santos",
+    role: "Creative Director",
+    email: "dio.santos@admindagency.com",
+    location: "Amsterdam",
+    initials: "DS",
+  },
+  {
     id: "dominika",
     name: "Dominika Konieczkowska-Kracik",
     role: "Creative Director",

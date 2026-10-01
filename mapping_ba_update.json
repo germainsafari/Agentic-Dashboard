@@ -33,11 +33,11 @@
     },
     "BA": {
       "leader_email": "marek.golebiowski@admindagency.com",
-      "upper_leader_email": "aleksandra.golab@admindagency.com"
+      "upper_leader_email": "justyna.dorman@admindagency.com"
     },
     "CAMPAIGNS": {
       "leader_email": "katarzyna.wielgolaska@admindagency.com",
-      "upper_leader_email": "piotr.wisniewski@admindagency.com"
+      "upper_leader_email": "dio.santos@admindagency.com"
     },
     "CD": {
       "leader_email": "aleksandra.golab@admindagency.com",
@@ -49,7 +49,8 @@
     },
     "COPYWRITER": {
       "leader_email": "piotr.wisniewski@admindagency.com",
-      "upper_leader_email": "piotr.wisniewski@admindagency.com"
+      "upper_leader_email": "piotr.wisniewski@admindagency.com",
+      "former_member_emails": ["malwina.tuchendler@admindagency.com"]
     },
     "CT": {
       "leader_email": "jonattas.poltronieri@admindagency.com",
@@ -61,7 +62,7 @@
     },
     "FE": {
       "leader_email": "maria.dorda@admindagency.com",
-      "upper_leader_email": "piotr.wisniewski@admindagency.com",
+      "upper_leader_email": "dominika.konieczkowska@admindagency.com",
       "former_leader_emails": ["szymon.skrzypczak@admindagency.com"]
     },
     "MO - MAJA": {
@@ -119,7 +120,7 @@
     },
     "UBS-SYN": {
       "leader_email": "michal.danek@admindagency.com",
-      "upper_leader_email": "piotr.wisniewski@admindagency.com"
+      "upper_leader_email": "dio.santos@admindagency.com"
     },
     "UX": {
       "leader_email": "diana.krueger@admindagency.com",
@@ -708,13 +709,6 @@
       "leader_email": "michal.majewski@admindagency.com",
       "weekly_target": 40.0,
       "is_team_lead": true
-    },
-    {
-      "name": "Malwina Tuchendler",
-      "email": "malwina.tuchendler@admindagency.com",
-      "team": "COPYWRITER",
-      "leader_email": "piotr.wisniewski@admindagency.com",
-      "weekly_target": 40.0
     },
     {
       "name": "Małgorzata Piwowarczyk",

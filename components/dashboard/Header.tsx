@@ -4,12 +4,14 @@ import React from "react";
 import Link from "next/link";
 import { COLORS, ESCALATION_YEARLY_MAX, type DataSource } from "@/lib/brand";
 import type { ResolvedDirector } from "@/lib/directors";
+import type { MockEscalation } from "@/lib/mock";
+import { EscalationProjectsPanel, HoverPopover } from "./ProjectListPopover";
 
 type Props = {
   director: ResolvedDirector;
   updatedAt: string;
   dataSource: DataSource;
-  escalationCount: number;
+  escalations: MockEscalation[];
   kpiAchievement: { achieved: number; total: number };
   onEscalationClick: () => void;
 };
@@ -20,10 +22,11 @@ export function Header({
   director,
   updatedAt,
   dataSource,
-  escalationCount,
+  escalations,
   kpiAchievement,
   onEscalationClick,
 }: Props) {
+  const escalationCount = escalations.length;
   return (
     <header
       className="px-12 pt-5"
@@ -142,49 +145,54 @@ export function Header({
             </div>
           </div>
 
-          <button
-            type="button"
-            onClick={onEscalationClick}
-            className="flex flex-col gap-2 cursor-pointer bg-transparent border-0 text-left hover:bg-subtleBg transition-colors"
-            style={{ padding: "12px 20px", minWidth: 192 }}
+          <HoverPopover
+            style={{ display: "flex" }}
+            panel={<EscalationProjectsPanel escalations={escalations} align="right" />}
           >
-            <div className="flex justify-between items-center">
-              <div
-                className="uppercase text-muted"
-                style={{ fontSize: 9, letterSpacing: "0.16em" }}
-              >
-                Project Escalations — {new Date().getFullYear()}
-              </div>
-              <span className="text-muted" style={{ fontSize: 10 }}>
-                View →
-              </span>
-            </div>
-            <div className="flex items-center gap-3">
-              <div className="flex items-baseline gap-1.5">
+            <button
+              type="button"
+              onClick={onEscalationClick}
+              className="flex flex-col gap-2 cursor-pointer bg-transparent border-0 text-left hover:bg-subtleBg transition-colors"
+              style={{ padding: "12px 20px", minWidth: 192, height: "100%" }}
+            >
+              <div className="flex justify-between items-center">
                 <div
-                  className="font-sans text-ink"
-                  style={{ fontSize: 32, lineHeight: 1, letterSpacing: "-0.02em" }}
+                  className="uppercase text-muted"
+                  style={{ fontSize: 9, letterSpacing: "0.16em" }}
                 >
-                  {escalationCount}
+                  Project Escalations — {new Date().getFullYear()}
                 </div>
-                <div className="text-muted" style={{ fontSize: 11 }}>
-                  / {ESCALATION_TARGET} max
-                </div>
+                <span className="text-muted" style={{ fontSize: 10 }}>
+                  View →
+                </span>
               </div>
-              <div className="flex gap-[3px] flex-1">
-                {Array.from({ length: ESCALATION_TARGET }).map((_, i) => (
+              <div className="flex items-center gap-3">
+                <div className="flex items-baseline gap-1.5">
                   <div
-                    key={i}
-                    className="flex-1"
-                    style={{
-                      height: 6,
-                      background: i < escalationCount ? COLORS.tangerine : COLORS.gray01,
-                    }}
-                  />
-                ))}
+                    className="font-sans text-ink"
+                    style={{ fontSize: 32, lineHeight: 1, letterSpacing: "-0.02em" }}
+                  >
+                    {escalationCount}
+                  </div>
+                  <div className="text-muted" style={{ fontSize: 11 }}>
+                    / {ESCALATION_TARGET} max
+                  </div>
+                </div>
+                <div className="flex gap-[3px] flex-1">
+                  {Array.from({ length: ESCALATION_TARGET }).map((_, i) => (
+                    <div
+                      key={i}
+                      className="flex-1"
+                      style={{
+                        height: 6,
+                        background: i < escalationCount ? COLORS.tangerine : COLORS.gray01,
+                      }}
+                    />
+                  ))}
+                </div>
               </div>
-            </div>
-          </button>
+            </button>
+          </HoverPopover>
         </div>
       </div>
     </header>

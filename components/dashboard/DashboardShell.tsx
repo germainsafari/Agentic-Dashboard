@@ -65,9 +65,9 @@ export function DashboardShell({
   }, []);
 
   const escalationsByTeam = React.useMemo(() => {
-    const o: Record<string, number> = {};
+    const o: Record<string, MockEscalation[]> = {};
     for (const e of escalations) {
-      o[e.teamCode] = (o[e.teamCode] ?? 0) + 1;
+      (o[e.teamCode] ??= []).push(e);
     }
     return o;
   }, [escalations]);
@@ -85,7 +85,7 @@ export function DashboardShell({
         director={director}
         updatedAt={updatedAt}
         dataSource={dataSource}
-        escalationCount={escalations.length}
+        escalations={escalations}
         kpiAchievement={kpiAchievement}
         onEscalationClick={() => setEscOpen(true)}
       />

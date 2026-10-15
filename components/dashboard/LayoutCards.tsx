@@ -5,15 +5,21 @@ import { GoalBar } from "@/components/ui/GoalBar";
 import { COLORS, KPI_META, type Period } from "@/lib/brand";
 import { isFtaMutedForTeam } from "@/lib/fta-display";
 import type { ResolvedDirector } from "@/lib/directors";
-import type { TeamStats } from "@/lib/mock";
+import type { MockEscalation, TeamStats } from "@/lib/mock";
 import { TeamHeader } from "./TeamHeader";
+import {
+  EscalationProjectsPanel,
+  HoverPopover,
+  PitchProjectsPanel,
+} from "./ProjectListPopover";
+import { pitchTasksFor } from "@/lib/pitch-display";
 
 type TeamBundle = { team: ResolvedDirector["teams"][number]; stats: TeamStats };
 
 type Props = {
   teamStats: TeamBundle[];
   quarter: Period;
-  escalationsByTeam: Record<string, number>;
+  escalationsByTeam: Record<string, MockEscalation[]>;
   onTeamClick: (teamIdx: number, mode?: "escalation") => void;
   ftaEnabledTeamCodes: string[];
 };
@@ -38,7 +44,8 @@ export function LayoutCards({
       }}
     >
       {teamStats.map(({ team, stats }, ti) => {
-        const escCount = escalationsByTeam[team.code] ?? 0;
+        const teamEscalations = escalationsByTeam[team.code] ?? [];
+        const escCount = teamEscalations.length;
         return (
           <div
             key={team.code}
@@ -71,20 +78,24 @@ export function LayoutCards({
                 />
               </div>
               {escCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() => onTeamClick(ti, "escalation")}
-                  className="border-0 cursor-pointer uppercase"
-                  style={{
-                    background: COLORS.tangerine,
-                    color: "#fff",
-                    padding: "6px 10px",
-                    fontSize: 10,
-                    letterSpacing: "0.1em",
-                  }}
+                <HoverPopover
+                  panel={<EscalationProjectsPanel escalations={teamEscalations} align="right" />}
                 >
-                  {escCount} esc.
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => onTeamClick(ti, "escalation")}
+                    className="border-0 cursor-pointer uppercase"
+                    style={{
+                      background: COLORS.tangerine,
+                      color: "#fff",
+                      padding: "6px 10px",
+                      fontSize: 10,
+                      letterSpacing: "0.1em",
+                    }}
+                  >
+                    {escCount} esc.
+                  </button>
+                </HoverPopover>
               )}
             </div>
             <div
@@ -129,7 +140,12 @@ export function LayoutCards({
                   const values = stats.kpis[meta.key];
                   const v = values[quarter];
                   const ftaMuted = meta.key === "fta" && ftaMutedForTeam(team.code);
-                  return (
+                  const pitchKind =
+                    meta.key === "newBizWin" ? "newBiz" : meta.key === "existingWin" ? "existing" : null;
+                  const pitchTasks = pitchKind
+                    ? pitchTasksFor(stats.pitchDetails, pitchKind, quarter)
+                    : [];
+                  const kpiBlock = (
                     <div key={meta.key}>
                       <div
                         className="uppercase mb-1.5"
@@ -145,6 +161,23 @@ export function LayoutCards({
                       </div>
                       <GoalBar value={v} goal={meta.goal} compact muted={ftaMuted} />
                     </div>
+                  );
+                  return pitchKind && pitchTasks.length > 0 ? (
+                    <HoverPopover
+                      key={meta.key}
+                      panel={
+                        <PitchProjectsPanel
+                          tasks={pitchTasks}
+                          kind={pitchKind}
+                          period={quarter}
+                          align={pitchKind === "existing" ? "right" : "left"}
+                        />
+                      }
+                    >
+                      {kpiBlock}
+                    </HoverPopover>
+                  ) : (
+                    kpiBlock
                   );
                 })}
               </div>

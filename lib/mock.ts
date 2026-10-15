@@ -1,4 +1,4 @@
-import { KPI_META, PERIODS, type KpiKey } from "./brand";
+import { KPI_META, PERIODS, type KpiKey, type Quarter } from "./brand";
 import type { ResolvedDirector, ResolvedTeam } from "./directors";
 
 const ZERO_QUARTERS = Object.fromEntries(PERIODS.map((p) => [p, 0])) as Record<
@@ -35,9 +35,29 @@ export type ActiveProjectDetail = {
   openTaskCount: number;
 };
 
+/**
+ * One completed pitch that counted toward New biz win / Existing win — i.e.
+ * everything in the KPI's denominator (a won pitch is one per project, a lost
+ * one is one per task; see onePitchPerProject). Shown in the hover overlay on
+ * those KPIs (green = won, red = lost).
+ */
+export type PitchTaskDetail = {
+  taskId?: number;
+  /** Parent project's name (falls back to the task's own name if the project can't be resolved). */
+  project: string;
+  /** The pitch task's own name — shown beside lost pitches, which all hang off a shared offer-preparation project. */
+  task: string;
+  quarter: Quarter;
+  weight: 1 | 2 | 3;
+  won: boolean;
+  kind: "newBiz" | "existing";
+};
+
 export type TeamStats = {
   kpis: TeamKpis;
   activeProjects: number;
+  /** Absent on snapshots synced before this field existed. */
+  pitchDetails?: PitchTaskDetail[];
   /** Non-terminal client projects where the design lead has open tasks (for agent reconciliation). */
   activeProjectDetails?: ActiveProjectDetail[];
   projectsAnalyzed: {

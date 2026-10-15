@@ -6,7 +6,7 @@ import { DIRECTOR_SEEDS, type DirectorSeed } from "./directors";
 import { MAPPING, teamsForDirector } from "./mapping";
 import { scoroListAllPages, scoroListAllPagesUser, scoroPost, scoroPostUser, resolveScoroUserToken } from "./scoro-api";
 import type { MockEscalation } from "./mock";
-import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, TeamStats } from "./mock";
+import type { ActiveProjectDetail, EscalationRule, KpiDebug, KpiQuarterDebug, PitchTaskDetail, TeamStats } from "./mock";
 import { readMeta, writeMeta } from "./snapshot-cache";
 import type { TeamRosterSnapshot, AvailabilitySnapshot } from "./snapshot-types";
 import { weeklyAvailabilityForDate } from "./availability-history";
@@ -2579,6 +2579,11 @@ function buildPitchTaskPool(
 
 export type PitchTaskRecord = {
   taskId: number | undefined;
+  projectId: number | undefined;
+  /** The task's own name as shown in Scoro. */
+  taskName: string;
+  /** Parent project's name; starts as the task's own name and is replaced once the project is looked up. */
+  project: string;
   weight: 1 | 2 | 3;
   completed: boolean;
   /** Completed pitch still on an offer-prep project = lost; on any other project = won. */
@@ -2590,6 +2595,35 @@ export type PitchTaskRecord = {
 export type TeamTaskResults = {
   pitchTasks: PitchTaskRecord[];
 };
+
+/**
+ * The overlay lists the parent project (a task's own name tells you little),
+ * so look the names up — only for completed tasks, since those are the only
+ * ones that ever reach the list. A failure here must not take the whole team
+ * bundle down; the records just keep their task names.
+ */
+async function attachParentProjectNames(pitchTasks: PitchTaskRecord[], teamCode: string): Promise<void> {
+  const ids = [
+    ...new Set(
+      pitchTasks.filter((p) => p.completed && p.projectId != null).map((p) => p.projectId as number)
+    ),
+  ];
+  if (ids.length === 0) return;
+  try {
+    const projects = await fetchProjectsByIds(ids, new Map());
+    const nameById = new Map<number, string>();
+    for (const p of projects) {
+      const name = String(p.project_name ?? "").trim();
+      if (name) nameById.set(projectNumericId(p), name);
+    }
+    for (const rec of pitchTasks) {
+      const name = rec.projectId != null ? nameById.get(rec.projectId) : undefined;
+      if (name) rec.project = name;
+    }
+  } catch (e) {
+    console.warn(`[pitch] ${teamCode}: could not resolve parent project names — listing task names instead:`, e);
+  }
+}
 
 /**
  * Fetch tasks for team members and extract pitch records.
@@ -2639,6 +2673,9 @@ export async function fetchTeamTasks(
     if (taskId != null) seenPitch.add(taskId);
     pitchTasks.push({
       taskId: taskId ?? undefined,
+      projectId: pid ?? undefined,
+      taskName: String(t.event_name ?? t.name ?? t.description ?? "Pitch task"),
+      project: String(t.event_name ?? t.name ?? t.description ?? "Pitch task"),
       weight,
       completed,
       won: completed && !onOfferPrep,
@@ -2651,6 +2688,7 @@ export async function fetchTeamTasks(
     console.log(
       `[pitch] ${team.code}: found ${pitchTasks.length} pitch tasks (${pitchTasks.filter((p) => p.completed).length} completed)`
     );
+    await attachParentProjectNames(pitchTasks, team.code);
   }
 
   return { pitchTasks };
@@ -3006,8 +3044,38 @@ export async function fetchActiveProjectsForTeam(
 }
 
 /**
+ * What counts as one pitch:
+ *  - WON: a successful pitch becomes a project of its own, so several pitch
+ *    tasks on one (non-offer-prep) project are still one pitch. Keeps one task
+ *    per project and business kind — the highest tier (the pitch's size), ties
+ *    broken by the earliest quarter, so a project never lands in two quarters.
+ *  - LOST: a pitch that never became a project stays as a task on a shared
+ *    "Offer preparation" project, so every such task is its own lost pitch and
+ *    is never merged — collapsing by project would erase real losses.
+ * A won task with no resolvable project can't be matched to anything either,
+ * so it also stays its own pitch.
+ */
+export function onePitchPerProject(tasks: PitchTaskRecord[]): PitchTaskRecord[] {
+  const rank = (t: PitchTaskRecord) => (t.quarter ? QUARTERS.indexOf(t.quarter) : QUARTERS.length);
+  const kept = new Map<string, PitchTaskRecord>();
+  const separate: PitchTaskRecord[] = [];
+  for (const t of tasks) {
+    if (!t.won || t.projectId == null) {
+      separate.push(t);
+      continue;
+    }
+    const key = `${t.isNewBusiness ? "nb" : "ex"}|${t.projectId}`;
+    const cur = kept.get(key);
+    if (!cur || t.weight > cur.weight || (t.weight === cur.weight && rank(t) < rank(cur))) {
+      kept.set(key, t);
+    }
+  }
+  return [...kept.values(), ...separate];
+}
+
+/**
  * Compute weighted pitch win rates from task records.
- * Denominator: completed pitch tasks (by Business area).
+ * Denominator: completed pitches (won ones one per project, lost ones one per task), by Business area.
  * Numerator: completed pitches won — still on offer-prep project = lost.
  */
 export function computePitchKpisFromTasks(
@@ -3021,6 +3089,8 @@ export function computePitchKpisFromTasks(
     newBizWin: Record<Quarter, KpiQuarterDebug>;
     existingWin: Record<Quarter, KpiQuarterDebug>;
   };
+  /** Every completed pitch (one per project) that fed a denominator above, for the UI overlay. */
+  details: PitchTaskDetail[];
 } {
   const zeros = () =>
     Object.fromEntries(QUARTERS.map((q) => [q, 0])) as Record<Quarter, number>;
@@ -3034,12 +3104,25 @@ export function computePitchKpisFromTasks(
   const existingWin = zeros();
   const analyzed = { newBizWin: 0, existingWin: 0 };
   const debug = { newBizWin: zeroCounts(), existingWin: zeroCounts() };
+  const details: PitchTaskDetail[] = [];
+  const toDetail = (t: PitchTaskRecord, q: Quarter, kind: PitchTaskDetail["kind"]): PitchTaskDetail => ({
+    taskId: t.taskId,
+    project: t.project,
+    task: t.taskName,
+    quarter: q,
+    weight: t.weight,
+    won: t.won,
+    kind,
+  });
+
+  const completedPitches = onePitchPerProject(pitchTasks.filter((t) => t.completed));
 
   for (const q of QUARTERS) {
-    const inQuarter = pitchTasks.filter((t) => t.quarter === q);
+    const inQuarter = completedPitches.filter((t) => t.quarter === q);
 
     // New Business — denominator = completed only
     const nbCompleted = inQuarter.filter((t) => t.isNewBusiness && t.completed);
+    for (const t of nbCompleted) details.push(toDetail(t, q, "newBiz"));
     const nbWon = nbCompleted.filter((t) => t.won);
     const nbWeightAll = nbCompleted.reduce((s, t) => s + t.weight, 0);
     const nbWeightWon = nbWon.reduce((s, t) => s + t.weight, 0);
@@ -3049,6 +3132,7 @@ export function computePitchKpisFromTasks(
 
     // Existing Client — denominator = completed only
     const exCompleted = inQuarter.filter((t) => !t.isNewBusiness && t.completed);
+    for (const t of exCompleted) details.push(toDetail(t, q, "existing"));
     const exWon = exCompleted.filter((t) => t.won);
     const exWeightAll = exCompleted.reduce((s, t) => s + t.weight, 0);
     const exWeightWon = exWon.reduce((s, t) => s + t.weight, 0);
@@ -3057,7 +3141,7 @@ export function computePitchKpisFromTasks(
     analyzed.existingWin += exCompleted.length;
   }
 
-  return { newBizWin, existingWin, analyzed, debug };
+  return { newBizWin, existingWin, analyzed, debug, details };
 }
 
 export function clearLiveCaches(): void {
@@ -3182,6 +3266,7 @@ export async function loadTeamBundleFromScoro(
 
   return {
     kpis,
+    pitchDetails: pitchKpi.details,
     activeProjects: activeProjectCount(activeList),
     activeProjectDetails:
       activeProjectDetails ??

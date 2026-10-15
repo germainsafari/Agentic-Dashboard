@@ -6,9 +6,15 @@ import { GoalBar } from "@/components/ui/GoalBar";
 import { COLORS, KPI_META, type Period } from "@/lib/brand";
 import { isFtaMutedForTeam } from "@/lib/fta-display";
 import type { ResolvedDirector } from "@/lib/directors";
-import type { TeamStats } from "@/lib/mock";
+import type { MockEscalation, TeamStats } from "@/lib/mock";
 import { TeamHeader } from "./TeamHeader";
 import { KpiTooltip } from "./KpiTooltip";
+import {
+  EscalationProjectsPanel,
+  HoverPopover,
+  PitchProjectsPanel,
+} from "./ProjectListPopover";
+import { pitchTasksFor } from "@/lib/pitch-display";
 
 type TeamBundle = { team: ResolvedDirector["teams"][number]; stats: TeamStats };
 
@@ -18,7 +24,7 @@ type Props = {
   director: ResolvedDirector;
   teamStats: TeamBundle[];
   quarter: Period;
-  escalationsByTeam: Record<string, number>;
+  escalationsByTeam: Record<string, MockEscalation[]>;
   onTeamClick: (teamIdx: number, mode?: "escalation") => void;
   ftaEnabledTeamCodes: string[];
 };
@@ -32,6 +38,9 @@ export function LayoutRows({
   ftaEnabledTeamCodes,
 }: Props) {
   const [hover, setHover] = React.useState<HoverState>(null);
+  // True while the pointer is on a project-list panel, so the cursor-following
+  // KPI tooltip doesn't sit on top of the list being read.
+  const [overPanel, setOverPanel] = React.useState(false);
   const ftaMutedForTeam = (teamCode: string) =>
     isFtaMutedForTeam(teamCode, ftaEnabledTeamCodes);
 
@@ -79,7 +88,8 @@ export function LayoutRows({
       </div>
 
       {teamStats.map(({ team, stats }, ti) => {
-        const escCount = escalationsByTeam[team.code] ?? 0;
+        const teamEscalations = escalationsByTeam[team.code] ?? [];
+        const escCount = teamEscalations.length;
         return (
           <div
             key={team.code}
@@ -100,35 +110,42 @@ export function LayoutRows({
                 onClick={() => onTeamClick(ti)}
               />
               {escCount > 0 && (
-                <button
-                  type="button"
-                  onClick={() => onTeamClick(ti, "escalation")}
-                  className="border-0 cursor-pointer uppercase inline-flex items-center gap-1.5 mt-2"
-                  style={{
-                    padding: "4px 8px",
-                    background: COLORS.tangerine,
-                    color: "#fff",
-                    fontSize: 10,
-                    letterSpacing: "0.08em",
-                  }}
+                <HoverPopover
+                  style={{ display: "inline-block", marginTop: 8 }}
+                  panel={<EscalationProjectsPanel escalations={teamEscalations} />}
                 >
-                  <span
+                  <button
+                    type="button"
+                    onClick={() => onTeamClick(ti, "escalation")}
+                    className="border-0 cursor-pointer uppercase inline-flex items-center gap-1.5"
                     style={{
-                      width: 5,
-                      height: 5,
-                      borderRadius: "50%",
-                      background: "#fff",
+                      padding: "4px 8px",
+                      background: COLORS.tangerine,
+                      color: "#fff",
+                      fontSize: 10,
+                      letterSpacing: "0.08em",
                     }}
-                  />
-                  {escCount} escalation{escCount > 1 ? "s" : ""}
-                </button>
+                  >
+                    <span
+                      style={{
+                        width: 5,
+                        height: 5,
+                        borderRadius: "50%",
+                        background: "#fff",
+                      }}
+                    />
+                    {escCount} escalation{escCount > 1 ? "s" : ""}
+                  </button>
+                </HoverPopover>
               )}
             </div>
-            {KPI_META.map((meta) => {
+            {KPI_META.map((meta, mi) => {
               const values = stats.kpis[meta.key];
               const v = values[quarter];
               const isHover =
                 hover?.teamIdx === ti && hover?.kpiKey === meta.key;
+              const pitchKind =
+                meta.key === "newBizWin" ? "newBiz" : meta.key === "existingWin" ? "existing" : null;
               const ftaMuted = meta.key === "fta" && ftaMutedForTeam(team.code);
               return (
                 <div
@@ -142,14 +159,14 @@ export function LayoutRows({
                     })
                   }
                   onMouseMove={(e) =>
-                    setHover((prev) =>
-                      prev && prev.teamIdx === ti && prev.kpiKey === meta.key
-                        ? { ...prev, x: e.clientX, y: e.clientY }
-                        : prev
-                    )
+                    setHover({ teamIdx: ti, kpiKey: meta.key, x: e.clientX, y: e.clientY })
                   }
-                  onMouseLeave={() => setHover(null)}
+                  onMouseLeave={() => {
+                    setHover(null);
+                    setOverPanel(false);
+                  }}
                   style={{
+                    position: "relative",
                     padding:
                       meta.kind === "donut" ? "20px 16px" : "55px 16px 20px 16px",
                     alignSelf: "stretch",
@@ -216,6 +233,15 @@ export function LayoutRows({
                       return n != null && n > 0 ? `${n} ${label}` : "";
                     })()}
                   </div>
+                  {isHover && pitchKind && (
+                    <PitchProjectsPanel
+                      tasks={pitchTasksFor(stats.pitchDetails, pitchKind, quarter)}
+                      kind={pitchKind}
+                      period={quarter}
+                      align={mi === KPI_META.length - 1 ? "right" : "left"}
+                      onPanelHover={setOverPanel}
+                    />
+                  )}
                 </div>
               );
             })}
@@ -230,6 +256,7 @@ export function LayoutRows({
           if (!bundle || !meta) return null;
           const tooltipFtaMuted =
             meta.key === "fta" && ftaMutedForTeam(bundle.team.code);
+          if (overPanel) return null;
           return (
             <KpiTooltip
               x={hover.x}
